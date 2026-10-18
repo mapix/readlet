@@ -666,6 +666,7 @@ final class ReaderController: NSObject, ObservableObject {
 
     // MARK: narration focus box (AI 解读) — a breathing frame around the paragraph / figure being explained
     private var focusPage: Int?
+    var focusedNarrationPage: Int? { focusPage }
     private var focusRect: CGRect = .zero          // page coordinates
 
     func debugFocus() -> String {
@@ -815,13 +816,9 @@ final class ReaderController: NSObject, ObservableObject {
         let clip = sv.contentView
         let visH = clip.bounds.height
         var o = clip.bounds.origin
-        // centre within the area not covered by the narration player (bottom overlay)
+        // Align the top of the framed paragraph near the top of the reading viewport
         let coveredTop = min(visH * 0.6, topInset)
-        let covered = min(visH * 0.6 - coveredTop, bottomInset) + coveredTop
-        let usable = visH - covered
-        let rH = inDoc.height
-        // tall blocks (figures): align their top a little below the viewport top instead
-        let topPad: CGFloat = rH > usable * 0.9 ? 24 : (usable - rH) / 2
+        let topPad: CGFloat = 24
         let targetY = dv.isFlipped ? inDoc.minY - topPad - coveredTop : inDoc.maxY + topPad - visH + coveredTop
         let maxY = max(0, dv.bounds.height - visH)
         o.y = min(max(0, targetY), maxY)
@@ -836,7 +833,11 @@ final class ReaderController: NSObject, ObservableObject {
             MainActor.assumeIsolated {
                 sv.reflectScrolledClipView(clip)
                 self?.restoring = false
-                self?.pageChanged()
+                if let self, let fp = self.focusPage {
+                    if self.currentPageIndex != fp { self.currentPageIndex = fp }
+                } else {
+                    self?.pageChanged()
+                }
             }
         })
     }

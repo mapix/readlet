@@ -528,7 +528,9 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
         error = nil
         page = p
         state = .preparing
-        if Narrator.reader.currentPageIndex != p { Narrator.reader.goToPage(p) }
+        if Narrator.reader.currentPageIndex != p && Narrator.reader.focusedNarrationPage != p {
+            Narrator.reader.goToPage(p)
+        }
         if let cached = cachedScript(p), !ScriptParser.looksBroken(cached.map(\.text)), !cached.isEmpty {
             segments = cached
             segIndex = seg < 0 ? cached.count - 1 : min(seg, cached.count - 1)

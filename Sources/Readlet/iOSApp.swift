@@ -150,10 +150,21 @@ struct iOSRootView: View {
                     if path == "first", let first = store.lib.docs.first {
                         DocWindows.shared.open(first.id)
                         activeReaderDocId = first.id
+                    } else if path == "second", store.lib.docs.count > 1 {
+                        let second = store.lib.docs[1]
+                        DocWindows.shared.open(second.id)
+                        activeReaderDocId = second.id
                     } else if let id = UUID(uuidString: path), store.doc(id) != nil {
                         DocWindows.shared.open(id)
                         activeReaderDocId = id
                     }
+                } else if host == "narrate" {
+                    if let docId = activeReaderDocId, let ses = store.session(docId) {
+                        let rc = ReaderController.shared
+                        Narrator.shared.start(docId: docId, doc: ses.document(rc.variant), title: ses.doc.title, from: rc.currentPageIndex, resume: false)
+                    }
+                } else if host == "next-seg" {
+                    Narrator.shared.next()
                 } else if host == "close" {
                     activeReaderDocId = nil
                 }

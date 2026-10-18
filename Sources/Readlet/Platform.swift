@@ -191,10 +191,12 @@ final class ReaderController: NSObject, ObservableObject {
     var segmentMentionsFigure = false
     private var narrationAnnotations: [PDFAnnotation] = []
     private var focusPage: Int?
+    var focusedNarrationPage: Int? { focusPage }
     private var focusRect: CGRect = .zero
     private var focusView: UIView?
     private var loading = false
     private var pendingInitialPage: Int? = nil
+    private var programmaticScrollUntil = Date.distantPast
 
     override init() {
         super.init()
@@ -298,12 +300,16 @@ final class ReaderController: NSObject, ObservableObject {
 
     @objc private func pageChanged() {
         guard !loading, pendingInitialPage == nil, let doc = view.document, let cur = view.currentPage else { return }
+        layoutFocus(animated: false)
+        if Date() < programmaticScrollUntil, let fp = focusPage {
+            if currentPageIndex != fp { currentPageIndex = fp }
+            return
+        }
         let idx = doc.index(for: cur)
         guard idx != NSNotFound, idx >= 0 else { return }
         if currentPageIndex != idx {
             currentPageIndex = idx
         }
-        layoutFocus(animated: false)
         if let id = docId {
             UserDefaults.standard.set(idx, forKey: "page-" + id.uuidString)
             Store.shared.updateReadingProgress(docId: id, page: idx, pageCount: max(1, doc.pageCount))
@@ -621,6 +627,11 @@ final class ReaderController: NSObject, ObservableObject {
     }
 
     private func findScrollView(in root: UIView) -> UIScrollView? {
+        var anc = view.documentView?.superview
+        while let cur = anc {
+            if let sv = cur as? UIScrollView { return sv }
+            anc = cur.superview
+        }
         if let sv = root as? UIScrollView { return sv }
         for sub in root.subviews {
             if let found = findScrollView(in: sub) { return found }
@@ -629,20 +640,41 @@ final class ReaderController: NSObject, ObservableObject {
     }
 
     private func centerSmoothly(_ r: CGRect, on page: PDFPage) {
-        guard r.isSane, let sv = findScrollView(in: view) else { return }
+        scrollRectToTop(r, on: page, animated: true)
+        // Re-assert after PDFKit finishes any pending page/bilingual layout pass
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+            guard let self, let fp = self.focusPage, let shown = self.view.document?.safePage(fp) else { return }
+            self.layoutFocus(animated: false)
+            self.scrollRectToTop(self.focusRect, on: shown, animated: true)
+        }
+    }
+
+    private func scrollRectToTop(_ r: CGRect, on page: PDFPage, animated: Bool) {
+        view.layoutDocumentView()
+        guard r.isSane, let sv = findScrollView(in: view), sv.bounds.height > 40 else { return }
+        // Ensure sufficient bottom scroll headroom so even paragraphs near the bottom of a page
+        // can be scrolled all the way up to the top of the screen above the AI narrator card.
+        let neededBottomInset = max(320, sv.bounds.height * 0.72)
+        if sv.contentInset.bottom < neededBottomInset {
+            var inset = sv.contentInset
+            inset.bottom = neededBottomInset
+            sv.contentInset = inset
+        }
         let inView = view.convert(r, from: page)
-        let inScroll = sv.convert(inView, from: view)
-        guard inScroll.isSane, sv.bounds.height > 40 else { return }
-        // Reserve ~190pt at the bottom for the floating narrator card + bottom bar
-        let bottomCovered: CGFloat = min(sv.bounds.height * 0.48, 195)
-        let usableH = max(80, sv.bounds.height - bottomCovered)
-        let topPad: CGFloat = inScroll.height > usableH * 0.85 ? 18 : (usableH - inScroll.height) / 2
-        let targetY = inScroll.minY - topPad
+        guard inView.isSane else { return }
+        // Place the top of the framed paragraph near the top of the visible reading area (14pt margin)
+        let topPad: CGFloat = 14
+        let deltaY = inView.minY - topPad
+        let targetY = sv.contentOffset.y + deltaY
         let minY = -sv.adjustedContentInset.top
         let maxY = max(minY, sv.contentSize.height - sv.bounds.height + sv.adjustedContentInset.bottom)
         let clampedY = min(max(minY, targetY), maxY)
-        guard clampedY.isSane, abs(clampedY - sv.contentOffset.y) > 10 else { return }
-        sv.setContentOffset(CGPoint(x: sv.contentOffset.x, y: clampedY), animated: true)
+        if let fp = focusPage, currentPageIndex != fp {
+            currentPageIndex = fp
+        }
+        guard clampedY.isSane, abs(clampedY - sv.contentOffset.y) > 4 else { return }
+        programmaticScrollUntil = Date().addingTimeInterval(0.65)
+        sv.setContentOffset(CGPoint(x: sv.contentOffset.x, y: clampedY), animated: animated)
     }
 
     private func clearNarrationAnnotationsOnly() {
