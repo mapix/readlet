@@ -5,8 +5,10 @@
 # The .p8 key file must be at ~/.appstoreconnect/private_keys/AuthKey_<ASC_KEY_ID>.p8
 # (Alternative: open the .pkg with Apple's Transporter app.)
 set -e
+cd "$(dirname "$0")"
+[ -f .env.local ] && . ./.env.local
 PKG=${1:-dist/Readlet-$(cat VERSION)-AppStore.pkg}
-TEAM_ID="${TEAM_ID:-BDH2HLQA9V}"
+: "${TEAM_ID:?set TEAM_ID in environment or .env.local}"
 
 if [ -n "${ASC_KEY_ID:-}" ] && [ -n "${ASC_ISSUER_ID:-}" ]; then
   xcrun altool --validate-app -f "$PKG" -t macos --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"

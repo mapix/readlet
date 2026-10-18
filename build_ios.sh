@@ -8,13 +8,14 @@
 #   ./build_ios.sh device            Build Physical Device .app and dist/Readlet-iOS.ipa
 set -e
 cd "$(dirname "$0")"
+[ -f .env.local ] && . ./.env.local
 
 MODE="${1:-all}"
 VERSION=$(cat VERSION)
 BUILD=${BUILD:-$(git rev-list --count HEAD 2>/dev/null || echo 1)}
 NAME=Readlet
 BUNDLE_ID=io.novarock.readlet
-TEAM_ID="${TEAM_ID:-BDH2HLQA9V}"
+TEAM_ID="${TEAM_ID:-}"
 
 mkdir -p build dist
 
@@ -255,9 +256,11 @@ build_device() {
     cp "build/Readlet-iOS.mobileprovision" "$DEV_APP/embedded.mobileprovision"
   fi
 
-  DEV_SIGN=$(security find-identity -v -p codesigning | sed -n 's/.*"\(Apple Development: Weifeng Luo[^"]*\)"/\1/p' | head -1)
-  if [ -n "$DEV_SIGN" ] && [ -f "$DEV_APP/embedded.mobileprovision" ]; then
-    codesign --force --entitlements Resources/Readlet-iOS.entitlements --generate-entitlement-der --sign "$DEV_SIGN" "$DEV_APP"
+  SIGN_FILTER="${DEV_SIGN_IDENTITY:-Apple Development:}"
+  DEV_SIGN=$(security find-identity -v -p codesigning | sed -n "s/.*\"\\(${SIGN_FILTER}[^\"]*\\)\"/\\1/p" | head -1)
+  if [ -n "$DEV_SIGN" ] && [ -f "$DEV_APP/embedded.mobileprovision" ] && [ -n "$TEAM_ID" ]; then
+    sed -e "s/__TEAM_ID__/$TEAM_ID/g" -e "s/__BUNDLE_ID__/$BUNDLE_ID/g" Resources/Readlet-iOS.entitlements > build/readlet-ios.entitlements
+    codesign --force --entitlements build/readlet-ios.entitlements --generate-entitlement-der --sign "$DEV_SIGN" "$DEV_APP"
   elif [ -n "$DEV_SIGN" ]; then
     codesign --force --sign "$DEV_SIGN" --generate-entitlement-der "$DEV_APP" 2>/dev/null || codesign --force --sign - "$DEV_APP"
   else
@@ -273,6 +276,7 @@ build_device() {
 }
 
 build_appstore() {
+  : "${TEAM_ID:?set TEAM_ID in environment or .env.local}"
   [ -d "build/Readlet-iOS.app" ] || build_device
   echo "==> Exporting Readlet iOS App Store .ipa via Xcode Cloud-Managed Distribution ($TEAM_ID)…"
   local ARCHIVE="build/ios-mas/$NAME-iOS.xcarchive"
@@ -283,7 +287,8 @@ build_appstore() {
   if [ -d "build/Readlet-iOS.app.dSYM" ]; then
     cp -R "build/Readlet-iOS.app.dSYM" "$ARCHIVE/dSYMs/$NAME.app.dSYM"
   fi
-  DEV_SIGN=$(security find-identity -v -p codesigning | sed -n 's/.*"\(Apple Development: Weifeng Luo[^"]*\)"/\1/p' | head -1)
+  SIGN_FILTER="${DEV_SIGN_IDENTITY:-Apple Development:}"
+  DEV_SIGN=$(security find-identity -v -p codesigning | sed -n "s/.*\"\\(${SIGN_FILTER}[^\"]*\\)\"/\\1/p" | head -1)
   cat > "$ARCHIVE/Info.plist" <<A
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

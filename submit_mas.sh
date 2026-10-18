@@ -5,22 +5,23 @@ set -euo pipefail
 # Readlet 1.0.0 — Automated Mac App Store Submission Pipeline (via `asc` CLI)
 # ==============================================================================
 # Prerequisites:
-#   1. Run `asc web auth login --apple-id "luoweifeng.talent@gmail.com"` once
+#   1. Run `asc web auth login --apple-id "$APPLE_ID"` once
 #      (or configure `asc auth login` + a cached web session).
 #   2. Ensure `dist/Readlet-1.0.0-AppStore.pkg` exists (built via `./build_mas.sh`).
 # ==============================================================================
 
 cd "$(dirname "$0")"
+[ -f .env.local ] && . ./.env.local
 
-APPLE_ID="${APPLE_ID:-luoweifeng.talent@gmail.com}"
-TEAM_ID="BDH2HLQA9V"
-PUBLIC_PROVIDER_ID="38bb7382-e1d7-4fa2-8bf5-56c8c967ffb4"
+: "${APPLE_ID:?set APPLE_ID in environment or .env.local}"
+: "${TEAM_ID:?set TEAM_ID in environment or .env.local}"
+: "${PUBLIC_PROVIDER_ID:?set PUBLIC_PROVIDER_ID in environment or .env.local}"
 BUNDLE_ID="io.novarock.readlet"
 SKU="READLET001"
 APP_NAME="Readlet – AI Bilingual Reader"
-VERSION="1.0.0"
-BUILD_NUMBER="31"
-PKG_PATH="dist/Readlet-1.0.0-AppStore.pkg"
+VERSION=$(cat VERSION)
+BUILD_NUMBER="${BUILD_NUMBER:-$(git rev-list --count HEAD 2>/dev/null || echo 1)}"
+PKG_PATH="dist/Readlet-${VERSION}-AppStore.pkg"
 
 echo "==> [1/10] Checking asc web session & API key authentication..."
 if ! asc web auth status --apple-id "$APPLE_ID" --output json | grep -q '"authenticated":true'; then
@@ -45,7 +46,7 @@ if ! asc auth status --output json | grep -q '"name"'; then
         ISSUER_ID=$(asc web api-keys list --apple-id "$APPLE_ID" --public-provider-id "$PUBLIC_PROVIDER_ID" --output json | /usr/bin/python3 -c 'import sys, json; d=json.load(sys.stdin); print(d.get("issuerId",""))')
     fi
     asc auth login \
-        --name "weifeng-luo" \
+        --name "readlet-asc" \
         --key-id "$KEY_ID" \
         --issuer-id "$ISSUER_ID" \
         --private-key "$HOME/.asc/keys/AuthKey_${KEY_ID}.p8" \
@@ -162,7 +163,7 @@ asc metadata push \
 VERSION_ID=$(asc versions list --app "$APP_ID" --platform MAC_OS --output json | /usr/bin/python3 -c 'import sys, json; d=json.load(sys.stdin); print(d["data"][0]["id"])')
 asc versions update \
     --version-id "$VERSION_ID" \
-    --copyright "2026 Weifeng Luo"
+    --copyright "${COPYRIGHT_HOLDER:-2026 Novarock}"
 
 echo "==> [8/10] Uploading 12 Retina Screenshots (APP_DESKTOP 2880x1800) across en-US, zh-Hans, ja..."
 LOCS_JSON=$(asc localizations list --version "$VERSION_ID" --output json)
@@ -182,6 +183,7 @@ REVIEW_NOTES=$(/usr/bin/python3 -c '
 import os, re
 cfg_path = os.path.expanduser("~/.config/readlet/config.toml")
 api_key = ""
+gateway_url = os.environ.get("REVIEW_GATEWAY_URL", "https://api.openai.com/v1")
 if os.path.exists(cfg_path):
     with open(cfg_path) as f:
         m = re.search(r"api_key\s*=\s*\"([^\"]+)\"", f.read())
@@ -196,19 +198,24 @@ print(f"""Readlet is a macOS document reader for PDF, EPUB, and web articles wit
 2. Testing AI Features (Bilingual Translation, AI Narration & Copilot):
    - Open Settings (Cmd+,) -> AI Gateway / Provider.
    - Mode: Unified Gateway (OpenAI-compatible)
-   - Base URL: https://llm-proxy.learnings.ai
+   - Base URL: {gateway_url}
    - API Key: {api_key}
    - Text / Vision Model: gemini-2.5-flash
    - Click "Verify Connection", then click "Translate Page" or start "AI Narration" in the reader toolbar.
 """)
 ')
 
+: "${CONTACT_FIRST_NAME:?set CONTACT_FIRST_NAME in .env.local}"
+: "${CONTACT_LAST_NAME:?set CONTACT_LAST_NAME in .env.local}"
+: "${CONTACT_EMAIL:?set CONTACT_EMAIL in .env.local}"
+: "${CONTACT_PHONE:?set CONTACT_PHONE in .env.local}"
+
 asc review details-create \
     --version-id "$VERSION_ID" \
-    --contact-first-name "Weifeng" \
-    --contact-last-name "Luo" \
-    --contact-email "luoweifeng.talent@gmail.com" \
-    --contact-phone "+86 18616859891" \
+    --contact-first-name "$CONTACT_FIRST_NAME" \
+    --contact-last-name "$CONTACT_LAST_NAME" \
+    --contact-email "$CONTACT_EMAIL" \
+    --contact-phone "$CONTACT_PHONE" \
     --demo-account-required=false \
     --notes "$REVIEW_NOTES" \
     --if-exists update \

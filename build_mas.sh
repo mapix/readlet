@@ -12,5 +12,7 @@
 #   ./build_mas.sh
 set -e
 cd "$(dirname "$0")"
-export TEAM_ID="${TEAM_ID:-BDH2HLQA9V}"
+[ -f .env.local ] && . ./.env.local
+: "${TEAM_ID:?set TEAM_ID in environment or .env.local}"
+export TEAM_ID
 MAS=1 UNIVERSAL=1 INSTALL=0 exec ./build_app.sh

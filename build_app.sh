@@ -11,6 +11,7 @@
 # Mac App Store edition: see build_mas.sh (sets MAS=1): sandboxed, no self-update, signed .pkg for upload.
 set -e
 cd "$(dirname "$0")"
+[ -f .env.local ] && . ./.env.local
 VERSION=$(cat VERSION)
 BUILD=${BUILD:-$(git rev-list --count HEAD 2>/dev/null || echo 1)}
 MAS=${MAS:-0}
@@ -117,7 +118,7 @@ xattr -cr "$APP" 2>/dev/null || true
 mkdir -p dist
 if [ "$MAS" = "1" ]; then
   # ---------------------------------------------------------------- Mac App Store
-  TEAM_ID="${TEAM_ID:-BDH2HLQA9V}"
+  : "${TEAM_ID:?set TEAM_ID in environment or .env.local}"
   sed -e "s/__TEAM_ID__/$TEAM_ID/g" -e "s/__BUNDLE_ID__/$BUNDLE_ID/g" Resources/Readlet-MAS.entitlements > build/mas/readlet.entitlements
   PKG="dist/$NAME-$VERSION-AppStore.pkg"
   rm -f "$PKG"
@@ -129,8 +130,9 @@ if [ "$MAS" = "1" ]; then
     productbuild --component "$APP" /Applications --sign "$MAS_INSTALLER_IDENTITY" "$PKG"
   else
     echo "packaging via Xcode Cloud-Managed Distribution for Team $TEAM_ID…"
-    DEV_SIGN=$(security find-identity -v -p codesigning | sed -n 's/.*"\(Apple Development: Weifeng Luo[^"]*\)"/\1/p' | head -1)
-    : "${DEV_SIGN:?no Apple Development certificate found for Weifeng Luo}"
+    SIGN_FILTER="${DEV_SIGN_IDENTITY:-Apple Development:}"
+    DEV_SIGN=$(security find-identity -v -p codesigning | sed -n "s/.*\"\\(${SIGN_FILTER}[^\"]*\\)\"/\\1/p" | head -1)
+    : "${DEV_SIGN:?no matching Apple Development certificate found in Keychain}"
     PROFILE=$(grep -l "$TEAM_ID.$BUNDLE_ID" "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles/"*.provisionprofile 2>/dev/null | head -1 || true)
     [ -n "$PROFILE" ] && cp "$PROFILE" "$APP/Contents/embedded.provisionprofile"
     codesign --force --options runtime --entitlements build/mas/readlet.entitlements --generate-entitlement-der -s "$DEV_SIGN" "$APP"
@@ -178,7 +180,6 @@ X
 fi
 
 # -------------------------------------------------------------------- direct download
-TEAM_ID="${TEAM_ID:-BDH2HLQA9V}"
 cat > build/readlet.entitlements <<E
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0//EN">
@@ -190,8 +191,9 @@ if [ -n "${DEVELOPER_ID:-}" ]; then
   echo "signing with: $DEVELOPER_ID (hardened runtime)"
   codesign --force --deep --options runtime --timestamp --entitlements build/readlet.entitlements -s "$DEVELOPER_ID" "$APP"
 else
-  LOCAL_SIGN=$(security find-identity -v -p codesigning | sed -n 's/.*"\(Apple Development: Weifeng Luo[^"]*\)"/\1/p' | head -1)
-  if [ -n "$LOCAL_SIGN" ]; then
+  SIGN_FILTER="${DEV_SIGN_IDENTITY:-Apple Development:}"
+  LOCAL_SIGN=$(security find-identity -v -p codesigning | sed -n "s/.*\"\\(${SIGN_FILTER}[^\"]*\\)\"/\\1/p" | head -1)
+  if [ -n "$LOCAL_SIGN" ] && [ -n "${TEAM_ID:-}" ]; then
     echo "signing with: $LOCAL_SIGN + Xcode Cloud-Managed Developer ID (Team $TEAM_ID)"
     codesign --force --deep --options runtime --entitlements build/readlet.entitlements --generate-entitlement-der -s "$LOCAL_SIGN" "$APP"
     DEV_ARCHIVE="build/$NAME-devid.xcarchive"
@@ -242,7 +244,7 @@ ditto -c -k --sequesterRsrc --keepParent "$APP" "dist/$NAME-$VERSION.zip"
 if codesign -dvvv "$APP" 2>&1 | grep -q "Authority=Developer ID Application"; then
   ASC_P8=$(ls "$HOME/.asc/keys/AuthKey_"*.p8 2>/dev/null | head -1 || true)
   ASC_KEY_ID=$(basename "$ASC_P8" .p8 2>/dev/null | sed 's/^AuthKey_//' || true)
-  ASC_ISSUER_ID=$(asc auth issuer-id 2>/dev/null || echo "38bb7382-e1d7-4fa2-8bf5-56c8c967ffb4")
+  ASC_ISSUER_ID="${ASC_ISSUER_ID:-$(asc auth issuer-id 2>/dev/null || true)}"
   if [ -n "${NOTARY_PROFILE:-}" ]; then
     echo "notarizing with profile $NOTARY_PROFILE…"
     xcrun notarytool submit "dist/$NAME-$VERSION.zip" --keychain-profile "$NOTARY_PROFILE" --wait

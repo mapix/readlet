@@ -17,7 +17,7 @@ Below is the information requested under Guideline 2.1 (also saved in App Review
   Press Cmd+O (File -> Import PDF or Document…) or Cmd+Shift+O (File -> Import from Web…, e.g. https://jvns.ca/blog/2024/11/26/terminal-rules/). Highlighting text in 8 colors, excerpt cards, Mind Maps, search (Cmd+F), and narration with the macOS system voice work offline without setup.
 - AI Features (Bilingual Translation, AI Voice Narration, AI Assistant & Flashcards):
   Readlet is a Bring-Your-Own-Key (BYOK) / local-AI app. For App Review testing, configure Settings (Cmd+,) -> General -> Gateway:
-  • Base URL: https://llm-proxy.learnings.ai
+  • Base URL: <REVIEW_GATEWAY_URL>
   • API Key: <REVIEW_API_KEY>
   • Protocol: Anthropic Messages
   • Chat / Translation Model: claude-haiku-5-5

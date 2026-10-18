@@ -31,11 +31,9 @@ final class UpdateChecker: ObservableObject {
 
     private let endpoints = [
         URL(string: "https://readlet.novarock.io/download/latest.json")!,
-        URL(string: "https://readlet.learnings.ai/download/latest.json")!,
     ]
     private let downloadBases = [
         URL(string: "https://readlet.novarock.io/download/")!,
-        URL(string: "https://readlet.learnings.ai/download/")!,
     ]
 
     @Published var availableRelease: Release? = nil

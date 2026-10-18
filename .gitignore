@@ -13,6 +13,12 @@ takeover.sh
 configure_from_codex.sh
 
 .asc/
-landing/download/
+.env*
+*.mobileprovision
+*.provisionprofile
+*.p8
+*.p12
+*.cer
+*.key
 AppStore/*.mp4
 landing/*.mp4

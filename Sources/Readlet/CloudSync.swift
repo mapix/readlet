@@ -501,7 +501,7 @@ final class CloudSync: ObservableObject {
             let desc = primaryCloud.path.replacingOccurrences(of: NSHomeDirectory(), with: "~")
             if cloudLocationDescription != desc { cloudLocationDescription = desc }
         } else if hasKVS {
-            let desc = "iCloud (BDH2HLQA9V.io.novarock.readlet)"
+            let desc = "iCloud (io.novarock.readlet)"
             if cloudLocationDescription != desc { cloudLocationDescription = desc }
         } else {
             state = .unavailable("未检测到 iCloud Drive 目录")
