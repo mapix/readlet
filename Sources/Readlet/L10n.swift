@@ -152,6 +152,7 @@ enum L10nTable {
         "搜索所有文档的卡片…": ("Search cards in all documents…", "すべての文書のカードを検索…"),
         "摘录选中内容为卡片": ("Excerpt Selection as Card", "選択範囲をカードに抜粋"),
         "收起 AI 助手": ("Hide AI Assistant", "AI アシスタントを閉じる"),
+        "调整 AI 助手栏宽度": ("Resize AI Assistant Panel", "AI アシスタントの幅を調整"),
         "收起为桌面小组件（⌘⇧M）": ("Collapse to Desktop Widget (⌘⇧M)", "デスクトップウィジェットに縮小（⌘⇧M）"),
         "收起讲稿": ("Hide Script", "原稿を隠す"),
         "放大": ("Zoom In", "拡大"),
