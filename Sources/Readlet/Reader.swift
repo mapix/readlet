@@ -257,8 +257,13 @@ final class ReaderController: NSObject, ObservableObject {
     }
 
     private var loading = false
+    private var programmaticScrollUntil = Date.distantPast
     @objc func pageChanged() {
-        guard !loading, let d = view.document, let p = view.currentPage else { return }
+        guard !loading, !restoring, Date() >= programmaticScrollUntil, let d = view.document, let p = view.currentPage else { return }
+        if let fp = focusPage, Narrator.shared.state != .idle {
+            if currentPageIndex != fp { currentPageIndex = fp }
+            return
+        }
         let i = d.index(for: p)
         if i != currentPageIndex { currentPageIndex = i }
         if let id = docId {
@@ -401,6 +406,7 @@ final class ReaderController: NSObject, ObservableObject {
     private var userScrolledAt = Date.distantPast
 
     private func reassert() {
+        guard focusPage == nil || Narrator.shared.state == .idle else { holdTarget = nil; return }
         guard let t = holdTarget, Date() < holdUntil, userScrolledAt < holdUntil.addingTimeInterval(-1.2) else { holdTarget = nil; return }
         restoring = true
         restore(t, replaced: -1)
@@ -421,6 +427,11 @@ final class ReaderController: NSObject, ObservableObject {
         work()           // may replace view.document (see documentReplaced)
         swappingAnchor = nil
         view.layoutDocumentView()
+        if let fp = focusPage, Narrator.shared.state != .idle {
+            restoring = false
+            highlightNarration(page: fp, quote: focusQuote)
+            return
+        }
         let newIns = session.insertions[a.index] ?? []
         restore(a, replaced: a.index, oldIns: oldIns, newIns: newIns)
         // PDFView restores its own saved destination asynchronously after page insert/remove; hold our position
@@ -668,6 +679,8 @@ final class ReaderController: NSObject, ObservableObject {
     private var focusPage: Int?
     var focusedNarrationPage: Int? { focusPage }
     private var focusRect: CGRect = .zero          // page coordinates
+    private var focusQuote: String?
+    private var scrollTimer: Timer?
 
     func debugFocus() -> String {
         guard focusView != nil, let i = focusPage, let p = view.document?.safePage(i) else { return "none" }
@@ -678,20 +691,57 @@ final class ReaderController: NSObject, ObservableObject {
     }
 
     func clearNarrationHighlight() {
-        focusView?.removeFromSuperview(); focusView = nil; focusPage = nil
+        scrollTimer?.invalidate(); scrollTimer = nil
+        focusView?.removeFromSuperview(); focusView = nil; focusPage = nil; focusQuote = nil
     }
 
     /// set by the narrator: the spoken segment talks about a figure/table ("图", "表", "横轴"…)
     var segmentMentionsFigure = false
 
+    /// Fast single-page quote lookup that tolerates PDF line-wraps without scanning all pages of the book.
+    private func findQuote(_ q: String, on page: PDFPage) -> PDFSelection? {
+        if let raw = page.string, !raw.isEmpty {
+            let ns = raw as NSString
+            var candidates: [String] = [q]
+            if q.count > 18 { candidates.append(String(q.prefix(18))) }
+            if q.count > 10 { candidates.append(String(q.prefix(10))) }
+            let words = q.split(whereSeparator: { $0.isWhitespace })
+            if words.count >= 4 { candidates.append(words.prefix(4).joined(separator: " ")) }
+            if words.count >= 3 { candidates.append(words.prefix(3).joined(separator: " ")) }
+            if words.count >= 2 { candidates.append(words.prefix(2).joined(separator: " ")) }
+            for cand in candidates where cand.count >= 3 {
+                let r = ns.range(of: cand, options: [.caseInsensitive, .diacriticInsensitive])
+                if r.location != NSNotFound, let sel = page.selection(for: r), sel.bounds(for: page).width > 0 {
+                    return sel
+                }
+                let escaped = cand.split(whereSeparator: { $0.isWhitespace })
+                    .map { NSRegularExpression.escapedPattern(for: String($0)) }
+                    .joined(separator: "[\\s\\-\\n\\r]+")
+                if !escaped.isEmpty {
+                    let rr = ns.range(of: escaped, options: [.regularExpression, .caseInsensitive])
+                    if rr.location != NSNotFound, let sel = page.selection(for: rr), sel.bounds(for: page).width > 0 {
+                        return sel
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
     func highlightNarration(page i: Int, quote: String?) {
         guard let d = view.document, let shown = d.safePage(i), let docId = docId, let ses = store.sessions[docId],
               let orig = ses.original.safePage(i) else { return }
+        focusQuote = quote
         // always locate on the ORIGINAL page (bilingual pages carry hidden duplicate text from their bands)
         var target: CGRect?
         if let q = quote?.trimmingCharacters(in: .whitespacesAndNewlines), q.count >= 3 {
-            var found = ses.original.findString(q, withOptions: [.caseInsensitive]).first { $0.pages.contains(orig) }
-            if found == nil, q.count > 10 { found = ses.original.findString(String(q.prefix(10)), withOptions: [.caseInsensitive]).first { $0.pages.contains(orig) } }
+            var found = findQuote(q, on: orig)
+            if found == nil {
+                found = ses.original.findString(q, withOptions: [.caseInsensitive]).first { $0.pages.contains(orig) }
+            }
+            if found == nil, q.count > 10 {
+                found = ses.original.findString(String(q.prefix(10)), withOptions: [.caseInsensitive]).first { $0.pages.contains(orig) }
+            }
             if let sel = found { target = blockRect(around: sel.bounds(for: orig), page: orig, isFigure: segmentMentionsFigure) }
         }
         let origBox = orig.bounds(for: .cropBox)
@@ -714,6 +764,7 @@ final class ReaderController: NSObject, ObservableObject {
         guard let safe = r.sanitized(in: shown.bounds(for: .cropBox)) else { clearNarrationHighlight(); return }
         r = safe
         focusPage = i; focusRect = r
+        if currentPageIndex != i { currentPageIndex = i }
         installFocusLayer()
         layoutFocus(animated: true)
         centerSmoothly(r, on: shown)
@@ -771,7 +822,11 @@ final class ReaderController: NSObject, ObservableObject {
     private var focusView: NSView?
 
     private func installFocusLayer() {
-        guard focusView == nil, let dv = view.documentView else { return }
+        guard let dv = view.documentView else { return }
+        if let existing = focusView {
+            if existing.superview !== dv { dv.addSubview(existing) }
+            return
+        }
         let v = NSView(frame: .zero)
         v.wantsLayer = true
         guard let l = v.layer else { return }
@@ -807,39 +862,85 @@ final class ReaderController: NSObject, ObservableObject {
         } else { v.frame = f }
     }
 
-    /// Smoothly scroll so `r` (page coords) sits in the middle of the reading area.
+    /// Smoothly scroll so the top of `r` (page coords) aligns near the top of the reading viewport.
     func centerSmoothly(_ r: CGRect, on page: PDFPage) {
         guard r.isSane, let dv = view.documentView, let sv = dv.enclosingScrollView else { return }
+        holdTarget = nil
+        holdUntil = .distantPast
+        scrollTimer?.invalidate()
+        scrollTimer = nil
+
+        let clip = sv.contentView
         let inView = view.convert(r, from: page)
         let inDoc = dv.convert(inView, from: view)
-        guard inDoc.isSane, clip0Sane(sv.contentView.bounds) else { return }
-        let clip = sv.contentView
+        guard inDoc.isSane, clip0Sane(clip.bounds) else { return }
+
         let visH = clip.bounds.height
-        var o = clip.bounds.origin
-        // Align the top of the framed paragraph near the top of the reading viewport
-        let coveredTop = min(visH * 0.6, topInset)
-        let topPad: CGFloat = 24
-        let targetY = dv.isFlipped ? inDoc.minY - topPad - coveredTop : inDoc.maxY + topPad - visH + coveredTop
-        let maxY = max(0, dv.bounds.height - visH)
-        o.y = min(max(0, targetY), maxY)
-        guard o.isSane else { return }
-        if abs(o.y - clip.bounds.origin.y) < 8 { return }
+        let topPad: CGFloat = 18
+        let targetY = dv.isFlipped ? inDoc.minY - topPad : inDoc.maxY + topPad - visH
+        // Allow scrolling below y=0 in unflipped documentView coords so paragraphs in the lower portion
+        // of the last page (or a single-page PDF) can still move up to the top of the viewport.
+        let minY = dv.isFlipped ? 0 : -visH * 0.78
+        let maxY = dv.isFlipped ? max(0, dv.bounds.height - visH * 0.22) : max(0, dv.bounds.height - visH * 0.22)
+        let endY = min(max(minY, targetY), maxY)
+        let startY = clip.bounds.origin.y
+        guard endY.isSane, startY.isSane else { return }
+
+        programmaticScrollUntil = Date().addingTimeInterval(0.75)
+        if abs(endY - startY) < 2 {
+            clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: endY))
+            sv.reflectScrolledClipView(clip)
+            layoutFocus()
+            return
+        }
+
         restoring = true
-        NSAnimationContext.runAnimationGroup({ c in
-            c.duration = 0.6
-            c.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            clip.animator().setBoundsOrigin(o)
-        }, completionHandler: { [weak self] in
+        let steps = 16
+        var step = 0
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] t in
             MainActor.assumeIsolated {
+                guard let self, let dv = self.view.documentView, let sv = dv.enclosingScrollView else {
+                    t.invalidate()
+                    return
+                }
+                let clip = sv.contentView
+                step += 1
+                let progress = min(1.0, CGFloat(step) / CGFloat(steps))
+                let eased = 1.0 - pow(1.0 - progress, 3)
+                let curY = startY + (endY - startY) * eased
+                clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: curY))
                 sv.reflectScrolledClipView(clip)
-                self?.restoring = false
-                if let self, let fp = self.focusPage {
-                    if self.currentPageIndex != fp { self.currentPageIndex = fp }
-                } else {
-                    self?.pageChanged()
+                self.layoutFocus()
+                if step >= steps {
+                    t.invalidate()
+                    self.scrollTimer = nil
+                    self.restoring = false
+                    if let fp = self.focusPage, self.currentPageIndex != fp {
+                        self.currentPageIndex = fp
+                    }
+                    // Re-assert once more in case PDFKit performed an async tile/page layout pass
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+                        guard let self, self.scrollTimer == nil, let fp = self.focusPage,
+                              let pg = self.view.document?.safePage(fp),
+                              let dv = self.view.documentView, let sv = dv.enclosingScrollView else { return }
+                        let clip = sv.contentView
+                        let iv = self.view.convert(self.focusRect, from: pg)
+                        let idoc = dv.convert(iv, from: self.view)
+                        guard idoc.isSane, self.clip0Sane(clip.bounds) else { return }
+                        let vh = clip.bounds.height
+                        let ty = dv.isFlipped ? idoc.minY - topPad : idoc.maxY + topPad - vh
+                        let ey = min(max(dv.isFlipped ? 0 : -vh * 0.78, ty), max(0, dv.bounds.height - vh * 0.22))
+                        if abs(ey - clip.bounds.origin.y) > 4 {
+                            clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: ey))
+                            sv.reflectScrolledClipView(clip)
+                            self.layoutFocus()
+                        }
+                    }
                 }
             }
-        })
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        scrollTimer = timer
     }
 
     private func clip0Sane(_ b: CGRect) -> Bool { b.origin.isSane && b.width.isSane && b.height.isSane && b.height > 0 }

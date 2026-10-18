@@ -361,7 +361,13 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
         switch state {
         case .playing: player?.pause(); state = .paused
         case .paused:
-            if let p = player { p.play(); state = .playing } else { play(page: page, seg: segIndex) }
+            if let p = player {
+                if segIndex < segments.count {
+                    Narrator.reader.highlightNarration(page: page, quote: segments[segIndex].focus)
+                }
+                p.play()
+                state = .playing
+            } else { play(page: page, seg: segIndex) }
         default: break
         }
     }
@@ -558,6 +564,7 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
                 currentWav = wav
                 player = pl
                 state = .playing
+                Narrator.reader.highlightNarration(page: p, quote: segs[i].focus)
                 if recording { recorded.insert("\(p)-\(i)") }
                 pl.play()
                 // Start look-ahead buffering only after the current segment is actively playing
