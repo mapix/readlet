@@ -12,7 +12,7 @@ cd "$(dirname "$0")"
 
 MODE="${1:-all}"
 VERSION=$(cat VERSION)
-BUILD=${BUILD:-$(git rev-list --count HEAD 2>/dev/null || echo 1)}
+BUILD=${BUILD:-$(( $(git rev-list --count HEAD 2>/dev/null || echo 1) + 2 ))}
 NAME=Readlet
 BUNDLE_ID=io.novarock.readlet
 TEAM_ID="${TEAM_ID:-}"

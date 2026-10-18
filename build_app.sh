@@ -13,7 +13,7 @@ set -e
 cd "$(dirname "$0")"
 [ -f .env.local ] && . ./.env.local
 VERSION=$(cat VERSION)
-BUILD=${BUILD:-$(git rev-list --count HEAD 2>/dev/null || echo 1)}
+BUILD=${BUILD:-$(( $(git rev-list --count HEAD 2>/dev/null || echo 1) + 2 ))}
 MAS=${MAS:-0}
 NAME=Readlet
 BUNDLE_ID=io.novarock.readlet
