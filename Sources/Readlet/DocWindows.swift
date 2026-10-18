@@ -101,6 +101,7 @@ struct DocWindowView: View {
     @AppStorage("studyLayout") private var layoutRaw = StudyLayout.split.rawValue
     @AppStorage("showOutline") private var showOutline = false
     @AppStorage("showCopilot") private var showCopilot = false
+    @AppStorage("copilotPanelWidth") private var copilotWidth: Double = 380
     @State private var showFlash = false
 
     var layout: StudyLayout { StudyLayout(rawValue: layoutRaw) ?? .split }
@@ -108,30 +109,33 @@ struct DocWindowView: View {
     var body: some View {
         VStack(spacing: 0) {
             StudyToolbar(store: store, rc: rc, layoutRaw: $layoutRaw, showOutline: $showOutline, showCopilot: $showCopilot)
-            HStack(spacing: 0) {
-                if showOutline {
-                    OutlinePane(store: store, rc: rc).frame(width: 260)
-                    Divider()
-                }
-                Group {
-                    switch layout {
-                    case .reader: ReaderPane(store: store, rc: rc)
-                    case .map: MindMapView(store: store)
-                    case .split:
-                        HSplitView {
-                            ReaderPane(store: store, rc: rc).frame(minWidth: 420)
-                            MindMapView(store: store).frame(minWidth: 300, idealWidth: 420)
+            GeometryReader { geo in
+                let maxPanel = max(Self.minCopilotWidth, Double(geo.size.width) - Self.minMainWidth)
+                HStack(spacing: 0) {
+                    if showOutline {
+                        OutlinePane(store: store, rc: rc).frame(width: 260)
+                        Divider()
+                    }
+                    Group {
+                        switch layout {
+                        case .reader: ReaderPane(store: store, rc: rc)
+                        case .map: MindMapView(store: store)
+                        case .split:
+                            HSplitView {
+                                ReaderPane(store: store, rc: rc).frame(minWidth: 420)
+                                MindMapView(store: store).frame(minWidth: 300, idealWidth: 420)
+                            }
                         }
                     }
+                    if showCopilot {
+                        PanelResizeHandle(width: $copilotWidth, minWidth: Self.minCopilotWidth, maxWidth: maxPanel)
+                        CopilotPanel(store: store, rc: rc, open: $showCopilot)
+                            .frame(width: min(max(copilotWidth, Self.minCopilotWidth), maxPanel))
+                            .transition(.move(edge: .trailing))
+                    }
                 }
-                if showCopilot {
-                    Divider()
-                    CopilotPanel(store: store, rc: rc, open: $showCopilot)
-                        .frame(width: 380)
-                        .transition(.move(edge: .trailing))
-                }
+                .animation(.easeInOut(duration: 0.22), value: showCopilot)
             }
-            .animation(.easeInOut(duration: 0.22), value: showCopilot)
         }
         .overlay { if showFlash { FlashcardsView(store: store, rc: rc, open: $showFlash).transition(.opacity) } }
         .animation(.easeInOut(duration: 0.18), value: showFlash)
@@ -141,6 +145,56 @@ struct DocWindowView: View {
         .frame(minWidth: 820, minHeight: 560)
         .environment(\.colorScheme, MN.scheme)
         .id("\(theme.theme)-\(lang.lang)")          // rebuild with the new palette
+    }
+
+    static let minCopilotWidth: Double = 260
+    static let minMainWidth: Double = 400
+}
+
+/// A vertical divider to the trailing edge of a side panel; drag it horizontally
+/// to resize the panel. The line is 1pt wide but the hit area is widened to 7pt.
+struct PanelResizeHandle: View {
+    @Binding var width: Double
+    var minWidth: Double
+    var maxWidth: Double
+    @State private var hovered = false
+    @State private var startWidth: Double?
+
+    var body: some View {
+        Color.clear
+            .frame(width: 7)
+            .overlay(alignment: .center) {
+                Rectangle()
+                    .fill(hovered ? AnyShapeStyle(MN.accent) : AnyShapeStyle(Color(nsColor: .separatorColor)))
+                    .frame(width: hovered ? 2 : 1)
+            }
+            .contentShape(Rectangle())
+            .onHover { h in
+                hovered = h
+                if h { NSCursor.resizeLeftRight.set() } else if startWidth == nil { NSCursor.arrow.set() }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { v in
+                        NSCursor.resizeLeftRight.set()
+                        let s = startWidth ?? width
+                        startWidth = s
+                        // panel sits on the trailing edge: dragging left grows it, right shrinks it
+                        width = min(maxWidth, max(minWidth, s - Double(v.translation.width)))
+                    }
+                    .onEnded { _ in
+                        startWidth = nil
+                        NSCursor.arrow.set()
+                    }
+            )
+            .accessibilityLabel(L("调整 AI 助手栏宽度"))
+            .accessibilityValue(Text("\(Int(width)) pt"))
+            .accessibilityAdjustableAction { direction in
+                switch direction {
+                case .increment: width = min(maxWidth, width + 20)
+                default: width = max(minWidth, width - 20)
+                }
+            }
     }
 }
 #endif
