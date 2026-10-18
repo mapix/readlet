@@ -114,6 +114,27 @@ struct WindowConfigurator: NSViewRepresentable {
     func updateNSView(_ v: NSView, context: Context) {}
 }
 
+/// Restores standard macOS titlebar double-click (Zoom / Minimize) and drag behavior on our custom 40pt fullSizeContentView top bar.
+struct TitlebarInteraction: NSViewRepresentable {
+    final class BarView: NSView {
+        override var mouseDownCanMoveWindow: Bool { true }
+        override func mouseDown(with event: NSEvent) {
+            if event.clickCount == 2 {
+                let action = UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick") ?? "Maximize"
+                if action == "Minimize" {
+                    window?.performMiniaturize(nil)
+                } else if action != "None" {
+                    window?.zoom(nil)
+                }
+            } else {
+                super.mouseDown(with: event)
+            }
+        }
+    }
+    func makeNSView(context: Context) -> NSView { BarView() }
+    func updateNSView(_ v: NSView, context: Context) {}
+}
+
 // MARK: - study toolbar (dark, MarginNote style)
 
 struct StudyToolbar: View {
@@ -301,7 +322,7 @@ struct StudyToolbar: View {
         }
         .padding(.horizontal, 12)
         .frame(height: 40)
-        .background(MN.bar)
+        .background(ZStack { MN.bar; TitlebarInteraction() }.ignoresSafeArea(.container, edges: .top))
     }
 
     func showLibrary() {
@@ -498,7 +519,7 @@ struct LibraryView: View {
             }
             .padding(.horizontal, 14)
             .frame(height: 40)
-            .background(MN.bar)
+            .background(ZStack { MN.bar; TitlebarInteraction() }.ignoresSafeArea(.container, edges: .top))
 
             if (tab == 1 || openNotebook != nil) && !store.lib.docs.isEmpty {
                 let scopeDocs: [Doc] = {
