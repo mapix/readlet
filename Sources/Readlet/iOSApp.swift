@@ -2504,9 +2504,11 @@ struct iOSSettingsView: View {
     @ObservedObject var narrator = Narrator.shared
     @ObservedObject var lang = LangCenter.shared
     @ObservedObject var themeCenter = iOSThemeCenter.shared
+    @Environment(\.scenePhase) private var scenePhase
 
     @State private var baseURL = Settings.baseURL
     @State private var apiKey = Settings.apiKey
+    @State private var showAPIKey = false
     @State private var translateModel = ModelConfig.translateModel
     @State private var translateStyle = ModelConfig.style("translate")
     @State private var chatModel = ModelConfig.chatModel
@@ -2519,6 +2521,9 @@ struct iOSSettingsView: View {
     @State private var testStatus = ""
     @State private var isTesting = false
     @State private var showFolderPicker = false
+    @State private var didLoadInitialSettings = false
+    @State private var isReloadingFromStore = false
+    @State private var hasLocalEdits = false
 
     var body: some View {
         NavigationStack {
@@ -2591,10 +2596,27 @@ struct iOSSettingsView: View {
                             .multilineTextAlignment(.trailing)
                     }
                     LabeledContent("API Key") {
-                        SecureField("sk-...", text: $apiKey)
+                        HStack(spacing: 6) {
+                            Group {
+                                if showAPIKey {
+                                    TextField("sk-...", text: $apiKey)
+                                } else {
+                                    SecureField("sk-...", text: $apiKey)
+                                }
+                            }
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .multilineTextAlignment(.trailing)
+
+                            Button {
+                                showAPIKey.toggle()
+                            } label: {
+                                Image(systemName: showAPIKey ? "eye.slash" : "eye")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
                     LabeledContent(L("翻译模型")) {
                         TextField("claude-haiku-5-5", text: $translateModel)
@@ -2678,11 +2700,32 @@ struct iOSSettingsView: View {
             .background(MN.shelf)
             .navigationTitle(L("设置与同步"))
             .onAppear {
-                reloadFromSettings()
+                if !didLoadInitialSettings {
+                    didLoadInitialSettings = true
+                    reloadFromSettings()
+                }
             }
             .onChange(of: cloud.lastSyncedAt) { _, _ in
-                reloadFromSettings()
+                if !hasLocalEdits {
+                    reloadFromSettings()
+                }
             }
+            .onChange(of: scenePhase) { _, newPhase in
+                if newPhase != .active && hasLocalEdits {
+                    saveSettings()
+                }
+            }
+            .onChange(of: baseURL) { _, _ in autoSaveFieldEdit() }
+            .onChange(of: apiKey) { _, _ in autoSaveFieldEdit() }
+            .onChange(of: translateModel) { _, _ in autoSaveFieldEdit() }
+            .onChange(of: translateStyle) { _, _ in autoSaveFieldEdit() }
+            .onChange(of: chatModel) { _, _ in autoSaveFieldEdit() }
+            .onChange(of: chatStyle) { _, _ in autoSaveFieldEdit() }
+            .onChange(of: targetLang) { _, _ in autoSaveFieldEdit() }
+            .onChange(of: ttsProvider) { _, _ in autoSaveFieldEdit() }
+            .onChange(of: ttsVoice) { _, _ in autoSaveFieldEdit() }
+            .onChange(of: ttsSpeed) { _, _ in autoSaveFieldEdit() }
+            .onChange(of: narrationStyle) { _, _ in autoSaveFieldEdit() }
             .fileImporter(
                 isPresented: $showFolderPicker,
                 allowedContentTypes: [.folder],
@@ -2695,7 +2738,15 @@ struct iOSSettingsView: View {
         }
     }
 
+    private func autoSaveFieldEdit() {
+        guard !isReloadingFromStore else { return }
+        hasLocalEdits = true
+        saveSettings(syncImmediately: false)
+    }
+
     private func reloadFromSettings() {
+        isReloadingFromStore = true
+        defer { isReloadingFromStore = false }
         baseURL = Settings.baseURL
         apiKey = Settings.apiKey
         translateModel = ModelConfig.translateModel
@@ -2709,24 +2760,42 @@ struct iOSSettingsView: View {
         narrationStyle = Settings.narrationStyle
     }
 
-    private func saveSettings() {
-        Settings.baseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !apiKey.isEmpty {
-            Settings.apiKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func saveSettings(syncImmediately: Bool = true) {
+        let trimmedBase = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedBase.isEmpty {
+            Settings.baseURL = trimmedBase
         }
-        ModelConfig.setModel("translate", translateModel.trimmingCharacters(in: .whitespacesAndNewlines))
+        let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedKey.isEmpty {
+            Settings.apiKey = trimmedKey
+        }
+        let trimmedTransModel = translateModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedTransModel.isEmpty {
+            ModelConfig.setModel("translate", trimmedTransModel)
+        }
         ModelConfig.setStyle("translate", translateStyle)
-        ModelConfig.setModel("chat", chatModel.trimmingCharacters(in: .whitespacesAndNewlines))
+        let trimmedChatModel = chatModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedChatModel.isEmpty {
+            ModelConfig.setModel("chat", trimmedChatModel)
+        }
         ModelConfig.setStyle("chat", chatStyle)
         Settings.targetLang = targetLang
         Settings.ttsProvider = ttsProvider
-        Settings.ttsVoice = ttsVoice.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedVoice = ttsVoice.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedVoice.isEmpty {
+            Settings.ttsVoice = trimmedVoice
+        }
         Settings.ttsSpeed = ttsSpeed
         Settings.narrationStyle = narrationStyle
         narrator.provider = ttsProvider
-        narrator.voice = ttsVoice
+        if !trimmedVoice.isEmpty {
+            narrator.voice = trimmedVoice
+        }
         narrator.rate = ttsSpeed
-        CloudSync.shared.recordSettingsChange()
+        UserDefaults.standard.set(Date(), forKey: "icloud.settings.updatedAt")
+        if syncImmediately {
+            CloudSync.shared.recordSettingsChange()
+        }
     }
 
     private func testConnection() {

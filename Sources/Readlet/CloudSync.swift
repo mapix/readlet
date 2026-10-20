@@ -713,9 +713,16 @@ final class CloudSync: ObservableObject {
                     if let remoteSet = try? JSONDecoder().decode(CloudSettingsPayload.self, from: d) {
                         let localHasKey = !(bestSettings.apiKey ?? "").isEmpty
                         let remoteHasKey = !(remoteSet.apiKey ?? "").isEmpty
-                        if (!localHasKey && remoteHasKey) || (remoteSet.updatedAt > bestSettings.updatedAt && (remoteHasKey || !localHasKey)) {
+                        if remoteSet.updatedAt > bestSettings.updatedAt && (remoteHasKey || !localHasKey) {
                             bestSettings = remoteSet
                             newerRemoteSettings = remoteSet
+                        } else if !localHasKey && remoteHasKey {
+                            if bestSettings.updatedAt <= Date(timeIntervalSince1970: 1) {
+                                bestSettings = remoteSet
+                                newerRemoteSettings = remoteSet
+                            } else {
+                                bestSettings.apiKey = remoteSet.apiKey
+                            }
                         }
                     }
                 }
