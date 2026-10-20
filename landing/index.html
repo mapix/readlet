@@ -546,8 +546,9 @@
   // release metadata (version / checksum) from the server
   fetch('/download/latest.json').then(r => r.ok ? r.json() : null).then(j => {
     if (!j) return;
-    document.querySelectorAll('[data-dl]').forEach(a => a.href = '/download/' + j.file);
-    if (j.ios_file) document.querySelectorAll('[data-dl-ios]').forEach(a => a.href = '/download/' + j.ios_file);
+    const qs = j.sha256 ? ('?v=' + j.sha256.slice(0, 12)) : '';
+    document.querySelectorAll('[data-dl]').forEach(a => a.href = '/download/' + j.file + qs);
+    if (j.ios_file) document.querySelectorAll('[data-dl-ios]').forEach(a => a.href = '/download/' + j.ios_file + qs);
     window.__rel = j; applyRelease(j);
     if (j.sha256) document.getElementById('sha').textContent = 'SHA-256 ' + j.sha256.slice(0, 16) + '…';
   }).catch(() => {});
