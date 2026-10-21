@@ -316,11 +316,18 @@ A
   <key>signingStyle</key><string>automatic</string>
 </dict></plist>
 X
+  local ASC_AUTH_ARGS=()
+  local P8_FILE="${ASC_KEY_PATH:-$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID:-}.p8}"
+  [ -f "$P8_FILE" ] || P8_FILE=$(ls "$HOME/.appstoreconnect/private_keys/AuthKey_"*.p8 "$HOME/.asc/keys/AuthKey_"*.p8 2>/dev/null | head -1 || true)
+  if [ -n "$P8_FILE" ] && [ -f "$P8_FILE" ] && [ -n "${ASC_KEY_ID:-}" ] && [ -n "${ASC_ISSUER_ID:-}" ]; then
+    ASC_AUTH_ARGS=(-authenticationKeyPath "$P8_FILE" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID")
+  fi
   PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH" xcodebuild -exportArchive \
     -archivePath "$ARCHIVE" \
     -exportOptionsPlist build/ios-mas/ExportOptions.plist \
     -exportPath "$EXPORT_DIR" \
-    -allowProvisioningUpdates
+    -allowProvisioningUpdates \
+    "${ASC_AUTH_ARGS[@]}"
   if [ -f "$EXPORT_DIR/$NAME.ipa" ]; then
     cp "$EXPORT_DIR/$NAME.ipa" "dist/Readlet-$VERSION-iOS-AppStore.ipa"
     echo "✅ Packaged dist/Readlet-$VERSION-iOS-AppStore.ipa"

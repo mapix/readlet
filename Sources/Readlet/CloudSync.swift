@@ -47,6 +47,12 @@ final class CloudSync: ObservableObject {
         var narrationStyle: String
         var narrationExtraPrompt: String
         var apiKey: String?
+        var systemVoice: String? = nil
+        var ttsRegion: String? = nil
+        var ttsAppId: String? = nil
+        var providerVoices: [String: String]? = nil
+        var providerModels: [String: String]? = nil
+        var providerBaseURLs: [String: String]? = nil
     }
 
     @Published var isEnabled: Bool = {
@@ -914,6 +920,19 @@ final class CloudSync: ObservableObject {
             ?? (try? FileManager.default.attributesOfItem(atPath: ConfigFile.url.path)[.modificationDate] as? Date)
             ?? Date(timeIntervalSince1970: 0)
         let key = Settings.apiKey
+        var pVoices: [String: String] = [:]
+        var pModels: [String: String] = [:]
+        var pBases: [String: String] = [:]
+        for p in TTSProvider.allCases where p.isRemote {
+            let v = Settings.ttsVoice(p)
+            if !v.isEmpty { pVoices[p.rawValue] = v }
+            let m = Settings.ttsModel(p)
+            if !m.isEmpty { pModels[p.rawValue] = m }
+            if p != .gateway {
+                let b = Settings.ttsBaseURLOverride(p)
+                if !b.isEmpty { pBases[p.rawValue] = b }
+            }
+        }
         return CloudSettingsPayload(
             updatedAt: updatedAt,
             baseURL: Settings.baseURL,
@@ -928,7 +947,13 @@ final class CloudSync: ObservableObject {
             ttsSpeed: Settings.ttsSpeed,
             narrationStyle: Settings.narrationStyle.rawValue,
             narrationExtraPrompt: Settings.narrationExtraPrompt,
-            apiKey: key.isEmpty ? nil : key
+            apiKey: key.isEmpty ? nil : key,
+            systemVoice: Settings.systemVoice,
+            ttsRegion: Settings.ttsRegion.isEmpty ? nil : Settings.ttsRegion,
+            ttsAppId: Settings.ttsAppId.isEmpty ? nil : Settings.ttsAppId,
+            providerVoices: pVoices.isEmpty ? nil : pVoices,
+            providerModels: pModels.isEmpty ? nil : pModels,
+            providerBaseURLs: pBases.isEmpty ? nil : pBases
         )
     }
 
@@ -940,9 +965,39 @@ final class CloudSync: ObservableObject {
         if !s.assistantModel.isEmpty { ModelConfig.setModel("chat", s.assistantModel) }
         if let p = APIStyle(rawValue: s.assistantProtocol) { ModelConfig.setStyle("chat", p) }
         if !s.targetLang.isEmpty { Settings.targetLang = s.targetLang }
-        if let tp = TTSProvider(rawValue: s.ttsProvider) { Settings.ttsProvider = tp }
-        if !s.ttsVoice.isEmpty { Settings.ttsVoice = s.ttsVoice }
-        if s.ttsSpeed > 0 { Settings.ttsSpeed = s.ttsSpeed }
+        if let pVoices = s.providerVoices {
+            for (raw, v) in pVoices where !v.isEmpty {
+                if let p = TTSProvider(rawValue: raw) { Settings.setTTSVoice(v, p) }
+            }
+        }
+        if let pModels = s.providerModels {
+            for (raw, m) in pModels where !m.isEmpty {
+                if let p = TTSProvider(rawValue: raw) { Settings.setTTSModel(m, p) }
+            }
+        }
+        if let pBases = s.providerBaseURLs {
+            for (raw, b) in pBases {
+                if let p = TTSProvider(rawValue: raw), p != .gateway { Settings.setTTSBaseURL(b, p) }
+            }
+        }
+        if let reg = s.ttsRegion, !reg.isEmpty { Settings.ttsRegion = reg }
+        if let app = s.ttsAppId, !app.isEmpty { Settings.ttsAppId = app }
+        if let sysV = s.systemVoice {
+            Settings.systemVoice = sysV
+            Narrator.shared.systemVoice = sysV
+        }
+        if let tp = TTSProvider(rawValue: s.ttsProvider) {
+            Settings.ttsProvider = tp
+            Narrator.shared.provider = tp
+        }
+        if !s.ttsVoice.isEmpty {
+            Settings.ttsVoice = s.ttsVoice
+            Narrator.shared.voice = s.ttsVoice
+        }
+        if s.ttsSpeed > 0 {
+            Settings.ttsSpeed = s.ttsSpeed
+            Narrator.shared.rate = s.ttsSpeed
+        }
         if let st = NarrationStyle(rawValue: s.narrationStyle) { Settings.narrationStyle = st }
         Settings.narrationExtraPrompt = s.narrationExtraPrompt
         if let k = s.apiKey, !k.isEmpty, Settings.apiKey.isEmpty {

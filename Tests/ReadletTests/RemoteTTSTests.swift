@@ -51,7 +51,43 @@ final class RemoteTTSTests: XCTestCase {
         check(Data(hexString: "00ff10") == Data([0, 255, 16]) && Data(hexString: "0g") == nil, "hex")
         check(RemoteTTS.trimmedBase("https://a.com/v1/") == "https://a.com", "trim v1")
         check(TTSProvider(configName: "dashscope") == .qwen && TTSProvider(configName: "doubao") == .volcengine && TTSProvider(configName: "openai_compatible") == .openai, "config names")
-        
-        
+    }
+
+    func testTTSFieldsAndCloudSettingsPayload() throws {
+        // Verify all remote providers have preset voice suggestions
+        for p in TTSProvider.allCases {
+            if p.isRemote {
+                check(!p.voiceSuggestions.isEmpty, "voiceSuggestions for \(p.rawValue)")
+                check(!p.defaultVoice.isEmpty, "defaultVoice for \(p.rawValue)")
+            } else {
+                check(p.voiceSuggestions.isEmpty, "system voiceSuggestions empty")
+            }
+        }
+        // Verify CloudSettingsPayload round-trips new optional voice & provider fields and remains backward-compatible
+        let payload = CloudSync.CloudSettingsPayload(
+            updatedAt: Date(timeIntervalSince1970: 1700000000),
+            baseURL: "https://api.anthropic.com",
+            model: "claude-haiku-5-5",
+            translateModel: "claude-haiku-5-5",
+            translateProtocol: "anthropic",
+            assistantModel: "claude-haiku-5-5",
+            assistantProtocol: "anthropic",
+            targetLang: "简体中文",
+            ttsProvider: TTSProvider.qwen.rawValue,
+            ttsVoice: "Serena",
+            ttsSpeed: 1.25,
+            narrationStyle: NarrationStyle.deep.rawValue,
+            narrationExtraPrompt: "Explain formulas",
+            apiKey: nil,
+            systemVoice: "com.apple.voice.premium.zh-CN.Tingting",
+            ttsRegion: "eastasia",
+            ttsAppId: "app123",
+            providerVoices: ["qwen": "Serena", "openai": "nova"],
+            providerModels: ["qwen": "qwen3-tts-flash"],
+            providerBaseURLs: ["openai": "https://api.siliconflow.cn"]
+        )
+        let data = try JSONEncoder().encode(payload)
+        let decoded = try JSONDecoder().decode(CloudSync.CloudSettingsPayload.self, from: data)
+        XCTAssertEqual(decoded, payload)
     }
 }

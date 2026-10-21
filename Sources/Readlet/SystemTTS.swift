@@ -28,7 +28,12 @@ enum TTSProvider: String, CaseIterable, Identifiable {
     /// Chinese source label (localized with L())
     var title: String {
         switch self {
-        case .system: return "系统语音（macOS，免费，无需模型）"
+        case .system:
+            #if os(iOS)
+            return "系统语音（免费，无需模型）"
+            #else
+            return "系统语音（macOS，免费，无需模型）"
+            #endif
         case .gateway: return "主网关（/v1/audio/speech）"
         case .openai: return "OpenAI 或兼容接口"
         case .gemini: return "Google Gemini"
@@ -50,6 +55,19 @@ enum TTSProvider: String, CaseIterable, Identifiable {
         case .elevenlabs: return "ElevenLabs"
         case .minimax: return "MiniMax"
         case .volcengine: return "豆包"
+        }
+    }
+    var providerNote: String {
+        switch self {
+        case .gateway: return L("网关需提供 OpenAI 兼容的 POST /v1/audio/speech。")
+        case .openai: return L("OpenAI 官方，或任何兼容 POST /v1/audio/speech 的服务（如 SiliconFlow、本地 Kokoro）。")
+        case .gemini: return L("使用 Gemini API 的 Interactions 接口，Key 来自 Google AI Studio。")
+        case .qwen: return L("阿里云百炼 DashScope：北京地域用默认地址，新加坡地域改用 dashscope-intl。模型如 qwen3-tts-flash。")
+        case .azure: return L("填写语音资源的 Key 和区域；音色用完整名称，如 zh-CN-XiaoxiaoNeural。")
+        case .elevenlabs: return L("音色填 Voice ID，可在 ElevenLabs 的 Voice Library 中复制。")
+        case .minimax: return L("国内用默认地址，海外账号改用 https://api.minimax.io。")
+        case .volcengine: return L("在火山引擎控制台创建语音合成应用，填写 App ID 和 Access Token。")
+        case .system: return ""
         }
     }
     var defaultBaseURL: String {
@@ -161,6 +179,33 @@ enum TTSProvider: String, CaseIterable, Identifiable {
 struct VoiceOption: Hashable, Identifiable {
     let id: String
     let label: String
+}
+
+/// Per-provider editable TTS configuration fields shared by macOS and iOS Settings.
+struct TTSFields: Equatable {
+    var baseURL = "", key = "", model = "", voice = "", region = "", appId = ""
+    var keyManaged = false
+    static func load(_ p: TTSProvider) -> TTSFields {
+        TTSFields(
+            baseURL: Settings.ttsBaseURLOverride(p),
+            key: p.needsOwnKey ? Settings.ttsKey(p) : "",
+            model: Settings.ttsModel(p),
+            voice: Settings.ttsVoice(p),
+            region: Settings.ttsRegion,
+            appId: Settings.ttsAppId,
+            keyManaged: Settings.ttsKeyManagedByFile(p)
+        )
+    }
+    func save(_ p: TTSProvider) {
+        guard p.isRemote else { return }
+        if p != .gateway { Settings.setTTSBaseURL(baseURL.trimmingCharacters(in: .whitespacesAndNewlines), p) }
+        if p.needsOwnKey, !keyManaged { Settings.setTTSKey(key.trimmingCharacters(in: .whitespacesAndNewlines), p) }
+        if !model.isEmpty || p != .gateway { Settings.setTTSModel(model.trimmingCharacters(in: .whitespacesAndNewlines), p) }
+        let trimmedVoice = voice.trimmingCharacters(in: .whitespacesAndNewlines)
+        Settings.setTTSVoice(trimmedVoice.isEmpty ? p.defaultVoice : trimmedVoice, p)
+        if p.needsRegion { Settings.ttsRegion = region.trimmingCharacters(in: .whitespacesAndNewlines) }
+        if p.needsAppId { Settings.ttsAppId = appId.trimmingCharacters(in: .whitespacesAndNewlines) }
+    }
 }
 
 /// macOS system speech, rendered to a WAV so caching, speed control, buffering and MP4 export work unchanged.

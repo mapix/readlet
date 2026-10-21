@@ -1044,6 +1044,7 @@ struct iOSDocumentStudyView: View {
     @State private var showCopilotSheet = false
     @State private var showOutlineSheet = false
     @State private var showFlashcardsSheet = false
+    @State private var showVoiceSettingsSheet = false
     @State private var showPDFEditConfirmation: String?
 
     private var doc: Doc? { store.doc(docId) }
@@ -1093,8 +1094,12 @@ struct iOSDocumentStudyView: View {
                         }
 
                         if narrator.state != .idle && narrator.docId == docId {
-                            iOSNarratorBar(narrator: narrator, rc: rc)
-                                .padding(.horizontal, 12)
+                            iOSNarratorBar(
+                                narrator: narrator,
+                                rc: rc,
+                                onOpenVoiceSettings: { showVoiceSettingsSheet = true }
+                            )
+                            .padding(.horizontal, 12)
                         }
 
                         bottomReaderControlBar
@@ -1110,6 +1115,11 @@ struct iOSDocumentStudyView: View {
                         if narrator.state == .idle {
                             toggleNarration()
                         }
+                    }
+                }
+                if ProcessInfo.processInfo.arguments.contains("--voice-settings") {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                        showVoiceSettingsSheet = true
                     }
                 }
             }
@@ -1133,6 +1143,10 @@ struct iOSDocumentStudyView: View {
                         }
                 }
                 .preferredColorScheme(themeCenter.colorScheme)
+            }
+            .sheet(isPresented: $showVoiceSettingsSheet) {
+                iOSVoiceSettingsSheet()
+                    .preferredColorScheme(themeCenter.colorScheme)
             }
         }
     }
@@ -1291,6 +1305,68 @@ struct iOSDocumentStudyView: View {
                                 } label: {
                                     Label(LF("继续上次讲解 (p.%d · 第 %d 段)", saved.page + 1, saved.seg + 1), systemImage: "play.circle")
                                 }
+                            }
+                            Menu {
+                                Section(LF("音色 (%@)", L(narrator.effectiveProvider.shortTitle))) {
+                                    ForEach(narrator.voiceOptions) { o in
+                                        Button {
+                                            narrator.selectVoice(o.id)
+                                        } label: {
+                                            if narrator.currentVoiceID == o.id {
+                                                Label(L(o.label), systemImage: "checkmark")
+                                            } else {
+                                                Text(L(o.label))
+                                            }
+                                        }
+                                    }
+                                }
+                                Menu {
+                                    ForEach(TTSProvider.allCases) { p in
+                                        Button {
+                                            narrator.selectProvider(p)
+                                        } label: {
+                                            if narrator.provider == p && !narrator.fallbackToSystem {
+                                                Label(L(p.title), systemImage: "checkmark")
+                                            } else {
+                                                Text(L(p.title))
+                                            }
+                                        }
+                                    }
+                                } label: {
+                                    Label(L("音色来源"), systemImage: "waveform.badge.magnifyingglass")
+                                }
+                                Menu {
+                                    ForEach(NarrationStyle.allCases) { st in
+                                        Button {
+                                            Settings.narrationStyle = st
+                                            CloudSync.shared.recordSettingsChange()
+                                        } label: {
+                                            if Settings.narrationStyle == st {
+                                                Label(L(st.title), systemImage: "checkmark")
+                                            } else {
+                                                Text(L(st.title) + " — " + L(st.subtitle))
+                                            }
+                                        }
+                                    }
+                                } label: {
+                                    Label(L("讲解风格"), systemImage: "theatermasks")
+                                }
+                                Divider()
+                                Button {
+                                    showVoiceSettingsSheet = true
+                                } label: {
+                                    Label(L("语音与音色设置…"), systemImage: "slider.horizontal.3")
+                                }
+                            } label: {
+                                Label(
+                                    LF("音色与来源：%@ · %@", L(narrator.effectiveProvider.shortTitle), narrator.currentVoiceName),
+                                    systemImage: narrator.effectiveProvider == .system ? "person.wave.2" : "cloud"
+                                )
+                            }
+                            Button {
+                                showVoiceSettingsSheet = true
+                            } label: {
+                                Label(L("语音与音色设置…"), systemImage: "slider.horizontal.3")
                             }
                             if narrator.state != .idle && narrator.docId == docId {
                                 Button(role: .destructive) {
@@ -1513,8 +1589,10 @@ struct iOSSelectionExcerptBar: View {
 struct iOSNarratorBar: View {
     @ObservedObject var narrator: Narrator
     @ObservedObject var rc: ReaderController
+    var onOpenVoiceSettings: (() -> Void)? = nil
     @ObservedObject private var themeCenter = iOSThemeCenter.shared
     @Environment(\.colorScheme) private var colorScheme
+    @State private var styleTick = 0
 
     private var currentSubtitle: String {
         if narrator.listening {
@@ -1614,6 +1692,37 @@ struct iOSNarratorBar: View {
                 .buttonStyle(.plain)
             }
 
+            if narrator.fallbackToSystem {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                    Text(L("网关 TTS 不可用，已改用系统语音"))
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.orange)
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    Button {
+                        narrator.selectProvider(narrator.provider)
+                    } label: {
+                        Text(L("重试"))
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(MN.accent)
+                    }
+                    .buttonStyle(.plain)
+                    if let onOpenVoiceSettings {
+                        Button {
+                            onOpenVoiceSettings()
+                        } label: {
+                            Text(L("设置…"))
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
             if let r = narrator.resumedFrom, r.page == narrator.page {
                 Button {
                     narrator.restartFromCurrentPage()
@@ -1670,8 +1779,8 @@ struct iOSNarratorBar: View {
             .animation(.easeInOut(duration: 0.18), value: currentSubtitle)
 
             // Row 3: Spacious Transport & Voice Controls
-            HStack(spacing: 16) {
-                HStack(spacing: 18) {
+            HStack(spacing: 10) {
+                HStack(spacing: 14) {
                     Button {
                         narrator.previous()
                     } label: {
@@ -1713,10 +1822,82 @@ struct iOSNarratorBar: View {
                     .buttonStyle(.plain)
                 }
 
-                Spacer()
+                Spacer(minLength: 4)
+
+                // Compact, reasonably hidden Voice & Source Menu pill
+                let _ = styleTick
+                Menu {
+                    Section(LF("音色 (%@)", L(narrator.effectiveProvider.shortTitle))) {
+                        ForEach(narrator.voiceOptions) { o in
+                            Button {
+                                narrator.selectVoice(o.id)
+                            } label: {
+                                if narrator.currentVoiceID == o.id {
+                                    Label(L(o.label), systemImage: "checkmark")
+                                } else {
+                                    Text(L(o.label))
+                                }
+                            }
+                        }
+                    }
+                    Menu {
+                        ForEach(TTSProvider.allCases) { p in
+                            Button {
+                                narrator.selectProvider(p)
+                            } label: {
+                                if narrator.provider == p && !narrator.fallbackToSystem {
+                                    Label(L(p.title), systemImage: "checkmark")
+                                } else {
+                                    Text(L(p.title))
+                                }
+                            }
+                        }
+                    } label: {
+                        Label(L("音色来源"), systemImage: "waveform.badge.magnifyingglass")
+                    }
+                    Menu {
+                        ForEach(NarrationStyle.allCases) { st in
+                            Button {
+                                Settings.narrationStyle = st
+                                styleTick += 1
+                                CloudSync.shared.recordSettingsChange()
+                            } label: {
+                                if Settings.narrationStyle == st {
+                                    Label(L(st.title), systemImage: "checkmark")
+                                } else {
+                                    Text(L(st.title) + " — " + L(st.subtitle))
+                                }
+                            }
+                        }
+                    } label: {
+                        Label(L("讲解风格"), systemImage: "theatermasks")
+                    }
+                    if let onOpenVoiceSettings {
+                        Divider()
+                        Button {
+                            onOpenVoiceSettings()
+                        } label: {
+                            Label(L("语音与音色设置…"), systemImage: "slider.horizontal.3")
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: narrator.effectiveProvider == .system ? "person.wave.2" : "cloud")
+                            .font(.caption2.weight(.bold))
+                        Text(narrator.currentVoiceName)
+                            .font(.caption.weight(.semibold))
+                            .lineLimit(1)
+                            .frame(maxWidth: 68)
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .background(Capsule().fill(MN.accent.opacity(0.14)))
+                    .foregroundStyle(MN.accent)
+                }
+                .accessibilityLabel(L("音色"))
 
                 Menu {
-                    ForEach([Float(1.0), 1.25, 1.5, 1.75, 2.0, 2.5], id: \.self) { spd in
+                    ForEach([Float(0.75), 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0], id: \.self) { spd in
                         Button {
                             narrator.rate = spd
                         } label: {
@@ -1732,7 +1913,7 @@ struct iOSNarratorBar: View {
                     Text(String(format: "%.2gx", narrator.rate))
                         .font(.caption.monospacedDigit().weight(.bold))
                         .fixedSize(horizontal: true, vertical: false)
-                        .padding(.horizontal, 10)
+                        .padding(.horizontal, 9)
                         .padding(.vertical, 6)
                         .background(Capsule().fill(MN.accent.opacity(0.14)))
                         .foregroundStyle(MN.accent)
@@ -1754,7 +1935,7 @@ struct iOSNarratorBar: View {
                     }
                     .fixedSize(horizontal: true, vertical: false)
                     .foregroundStyle(narrator.listening ? .white : MN.accent)
-                    .padding(.horizontal, 10)
+                    .padding(.horizontal, 9)
                     .padding(.vertical, 6)
                     .background(Capsule().fill(narrator.listening ? Color.red : MN.accent.opacity(0.14)))
                 }
@@ -2514,10 +2695,6 @@ struct iOSSettingsView: View {
     @State private var chatModel = ModelConfig.chatModel
     @State private var chatStyle = ModelConfig.style("chat")
     @State private var targetLang = Settings.targetLang
-    @State private var ttsProvider = Settings.ttsProvider
-    @State private var ttsVoice = Settings.ttsVoice
-    @State private var ttsSpeed = Settings.ttsSpeed
-    @State private var narrationStyle = Settings.narrationStyle
     @State private var testStatus = ""
     @State private var isTesting = false
     @State private var showFolderPicker = false
@@ -2665,36 +2842,7 @@ struct iOSSettingsView: View {
                     }
                 }
 
-                Section(L("AI 语音讲解 (TTS)")) {
-                    Picker(L("语音引擎"), selection: $ttsProvider) {
-                        ForEach(TTSProvider.allCases) { p in
-                            Text(L(p.title)).tag(p)
-                        }
-                    }
-                    LabeledContent(L("音色 (Voice)")) {
-                        TextField("Zephyr", text: $ttsVoice)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .multilineTextAlignment(.trailing)
-                    }
-                    Picker(L("默认倍速"), selection: $ttsSpeed) {
-                        Text("1.0x").tag(Float(1.0))
-                        Text("1.25x").tag(Float(1.25))
-                        Text("1.5x").tag(Float(1.5))
-                        Text("2.0x").tag(Float(2.0))
-                    }
-                    Picker(L("讲解风格"), selection: $narrationStyle) {
-                        ForEach(NarrationStyle.allCases) { st in
-                            Text(L(st.title)).tag(st)
-                        }
-                    }
-                    Button {
-                        saveSettings()
-                        Task { try? await narrator.previewVoice() }
-                    } label: {
-                        Label(L("试听当前语音"), systemImage: "speaker.wave.2.fill")
-                    }
-                }
+                iOSVoiceSettingsSection(targetLang: targetLang)
             }
             .scrollContentBackground(.hidden)
             .background(MN.shelf)
@@ -2722,10 +2870,6 @@ struct iOSSettingsView: View {
             .onChange(of: chatModel) { _, _ in autoSaveFieldEdit() }
             .onChange(of: chatStyle) { _, _ in autoSaveFieldEdit() }
             .onChange(of: targetLang) { _, _ in autoSaveFieldEdit() }
-            .onChange(of: ttsProvider) { _, _ in autoSaveFieldEdit() }
-            .onChange(of: ttsVoice) { _, _ in autoSaveFieldEdit() }
-            .onChange(of: ttsSpeed) { _, _ in autoSaveFieldEdit() }
-            .onChange(of: narrationStyle) { _, _ in autoSaveFieldEdit() }
             .fileImporter(
                 isPresented: $showFolderPicker,
                 allowedContentTypes: [.folder],
@@ -2754,10 +2898,6 @@ struct iOSSettingsView: View {
         chatModel = ModelConfig.chatModel
         chatStyle = ModelConfig.style("chat")
         targetLang = Settings.targetLang
-        ttsProvider = Settings.ttsProvider
-        ttsVoice = Settings.ttsVoice
-        ttsSpeed = Settings.ttsSpeed
-        narrationStyle = Settings.narrationStyle
     }
 
     private func saveSettings(syncImmediately: Bool = true) {
@@ -2780,18 +2920,6 @@ struct iOSSettingsView: View {
         }
         ModelConfig.setStyle("chat", chatStyle)
         Settings.targetLang = targetLang
-        Settings.ttsProvider = ttsProvider
-        let trimmedVoice = ttsVoice.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedVoice.isEmpty {
-            Settings.ttsVoice = trimmedVoice
-        }
-        Settings.ttsSpeed = ttsSpeed
-        Settings.narrationStyle = narrationStyle
-        narrator.provider = ttsProvider
-        if !trimmedVoice.isEmpty {
-            narrator.voice = trimmedVoice
-        }
-        narrator.rate = ttsSpeed
         UserDefaults.standard.set(Date(), forKey: "icloud.settings.updatedAt")
         if syncImmediately {
             CloudSync.shared.recordSettingsChange()
@@ -2809,6 +2937,394 @@ struct iOSSettingsView: View {
                 testStatus = "❌ " + error.localizedDescription
             }
             isTesting = false
+        }
+    }
+}
+
+/// Reusable iOS Voice & Narration settings section with progressive disclosure.
+/// Exposes primary voice (`音色`) and voice source (`音色来源`) pickers cleanly, while tucking
+/// provider-specific endpoints, keys, models, custom voice IDs, and extra prompts inside a collapsible group.
+struct iOSVoiceSettingsSection: View {
+    let targetLang: String
+    var startExpanded: Bool = false
+
+    @ObservedObject private var narrator = Narrator.shared
+    @ObservedObject private var cloud = CloudSync.shared
+
+    @State private var ttsProvider: TTSProvider = Settings.ttsProvider
+    @State private var sysVoice: String = Settings.systemVoice
+    @State private var tts: TTSFields = TTSFields.load(Settings.ttsProvider)
+    @State private var ttsSpeed: Float = Settings.ttsSpeed
+    @State private var narrationStyle: NarrationStyle = Settings.narrationStyle
+    @State private var narrationExtraPrompt: String = Settings.narrationExtraPrompt
+    @State private var showAdvancedTTS: Bool = false
+    @State private var showProviderKey: Bool = false
+    @State private var isPreviewingTTS: Bool = false
+    @State private var previewStatus: String = ""
+    @State private var isReloading: Bool = false
+    @State private var didAppear: Bool = false
+
+    var body: some View {
+        Section {
+            Picker(L("音色来源"), selection: $ttsProvider) {
+                ForEach(TTSProvider.allCases) { p in
+                    Text(L(p.title)).tag(p)
+                }
+            }
+
+            if ttsProvider == .system {
+                let sysOptions = SystemTTS.options(for: targetLang)
+                Picker(L("音色 (Voice)"), selection: $sysVoice) {
+                    Text(L("自动（按目标语言）")).tag("")
+                    if !sysVoice.isEmpty && !sysOptions.contains(where: { $0.id == sysVoice }) {
+                        Text(sysVoice).tag(sysVoice)
+                    }
+                    ForEach(sysOptions) { v in
+                        Text(v.label).tag(v.id)
+                    }
+                }
+            } else {
+                let suggestions = ttsProvider.voiceSuggestions
+                Picker(L("音色 (Voice)"), selection: $tts.voice) {
+                    if !tts.voice.isEmpty && !suggestions.contains(where: { $0.id == tts.voice }) {
+                        Text("\(tts.voice) (\(L("自定义")))").tag(tts.voice)
+                    }
+                    ForEach(suggestions) { v in
+                        Text(L(v.label)).tag(v.id)
+                    }
+                }
+            }
+
+            Picker(L("讲解风格"), selection: $narrationStyle) {
+                ForEach(NarrationStyle.allCases) { st in
+                    Text(L(st.title) + " — " + L(st.subtitle)).tag(st)
+                }
+            }
+
+            Picker(L("默认倍速"), selection: $ttsSpeed) {
+                ForEach([Float(0.75), 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0], id: \.self) { spd in
+                    Text(String(format: "%.2gx", spd)).tag(spd)
+                }
+            }
+
+            DisclosureGroup(isExpanded: $showAdvancedTTS) {
+                if ttsProvider == .system {
+                    if SystemTTS.hasOnlyCompactVoices {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                                .font(.caption)
+                            Text(L("当前只有基础系统声音，听起来可能较机械。可在系统「设置 → 辅助功能 → 朗读内容 → 声音」中免费下载「增强」或「高级」版声音。"))
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
+                    } else {
+                        Text(L("更自然的系统声音可在「设置 → 辅助功能 → 朗读内容 → 声音」中下载，推荐「高级」或「增强」版本。"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    remoteProviderConfigRows
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(L("补充提示词（可选）"))
+                        .font(.subheadline)
+                    TextField(
+                        L("例如：多结合代码讲解；每页结尾用一句话总结"),
+                        text: $narrationExtraPrompt,
+                        axis: .vertical
+                    )
+                    .lineLimit(2...5)
+                    .font(.footnote)
+                    Text(L("修改后新生成的讲解会采用新风格，已生成的旧风格内容会保留，切回去可直接复用。"))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 2)
+            } label: {
+                HStack {
+                    Label(L("音色来源配置与高级选项"), systemImage: "slider.horizontal.3")
+                        .font(.subheadline)
+                    Spacer()
+                    if !showAdvancedTTS {
+                        Text(ttsProvider == .system ? L("系统声音 / 提示词") : (tts.model.isEmpty ? ttsProvider.defaultModel : tts.model))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+
+            Button {
+                previewVoice()
+            } label: {
+                HStack(spacing: 8) {
+                    if isPreviewingTTS {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "speaker.wave.2.fill")
+                    }
+                    Text(isPreviewingTTS ? L("合成中…") : L("试听当前语音"))
+                }
+            }
+            .disabled(isPreviewingTTS)
+
+            if !previewStatus.isEmpty {
+                Text(previewStatus)
+                    .font(.caption)
+                    .foregroundStyle(previewStatus.hasPrefix("✅") ? .green : (previewStatus.hasPrefix("❌") ? .red : .secondary))
+            }
+        } header: {
+            Text(L("AI 语音讲解 (TTS)"))
+        } footer: {
+            if ttsProvider.isRemote {
+                Text(L("请求失败（如没有模型、Key 无效）时，讲解会自动改用系统语音。"))
+            }
+        }
+        .onAppear {
+            if !didAppear {
+                didAppear = true
+                showAdvancedTTS = startExpanded
+                reloadFromStore()
+            }
+        }
+        .onChange(of: ttsProvider) { old, new in
+            guard !isReloading else { return }
+            tts.save(old)
+            isReloading = true
+            tts = TTSFields.load(new)
+            isReloading = false
+            if new.needsOwnKey && tts.key.isEmpty {
+                withAnimation { showAdvancedTTS = true }
+            }
+            saveToStore(syncImmediately: true)
+        }
+        .onChange(of: sysVoice) { _, _ in
+            guard !isReloading else { return }
+            saveToStore(syncImmediately: true)
+        }
+        .onChange(of: tts) { _, _ in
+            guard !isReloading else { return }
+            saveToStore(syncImmediately: false)
+        }
+        .onChange(of: ttsSpeed) { _, _ in
+            guard !isReloading else { return }
+            saveToStore(syncImmediately: true)
+        }
+        .onChange(of: narrationStyle) { _, _ in
+            guard !isReloading else { return }
+            saveToStore(syncImmediately: true)
+        }
+        .onChange(of: narrationExtraPrompt) { _, _ in
+            guard !isReloading else { return }
+            saveToStore(syncImmediately: false)
+        }
+        .onChange(of: narrator.provider) { _, newProvider in
+            if newProvider != ttsProvider { reloadFromStore() }
+        }
+        .onChange(of: narrator.voice) { _, newVoice in
+            if ttsProvider.isRemote && newVoice != tts.voice { reloadFromStore() }
+        }
+        .onChange(of: narrator.systemVoice) { _, newSysVoice in
+            if newSysVoice != sysVoice { reloadFromStore() }
+        }
+        .onChange(of: cloud.lastSyncedAt) { _, _ in
+            reloadFromStore()
+        }
+    }
+
+    @ViewBuilder
+    private var remoteProviderConfigRows: some View {
+        let p = ttsProvider
+        LabeledContent(L("自定义音色 ID")) {
+            HStack(spacing: 6) {
+                TextField(p.defaultVoice, text: $tts.voice)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .multilineTextAlignment(.trailing)
+                if !p.voiceSuggestions.isEmpty {
+                    Menu {
+                        ForEach(p.voiceSuggestions) { v in
+                            Button(L(v.label)) {
+                                tts.voice = v.id
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "list.bullet")
+                            .font(.caption)
+                            .foregroundStyle(MN.accent)
+                    }
+                }
+            }
+        }
+
+        if p == .gateway {
+            LabeledContent(L("地址与 Key"), value: L("使用「AI 网关与模型配置」"))
+        } else {
+            LabeledContent("Base URL") {
+                TextField(p.defaultBaseURL.isEmpty ? p.baseURLHint : p.defaultBaseURL, text: $tts.baseURL)
+                    .keyboardType(.URL)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .multilineTextAlignment(.trailing)
+            }
+            if !p.baseURLHint.isEmpty && p.baseURLHint != p.defaultBaseURL {
+                Text(L("留空使用默认：") + L(p.baseURLHint))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            if tts.keyManaged {
+                LabeledContent("API Key", value: L("由配置文件提供"))
+            } else {
+                LabeledContent(p == .volcengine ? "Access Token" : "API Key") {
+                    HStack(spacing: 6) {
+                        Group {
+                            if showProviderKey {
+                                TextField(p == .volcengine ? "Token..." : "sk-...", text: $tts.key)
+                            } else {
+                                SecureField(p == .volcengine ? "Token..." : "sk-...", text: $tts.key)
+                            }
+                        }
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .multilineTextAlignment(.trailing)
+
+                        Button {
+                            showProviderKey.toggle()
+                        } label: {
+                            Image(systemName: showProviderKey ? "eye.slash" : "eye")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+
+                        if let h = p.keyHelpURL, let u = URL(string: h) {
+                            Link(L("获取"), destination: u)
+                                .font(.caption.weight(.semibold))
+                        }
+                    }
+                }
+            }
+        }
+
+        if p.needsRegion {
+            LabeledContent(L("区域（Region）")) {
+                TextField("eastasia / eastus…", text: $tts.region)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .multilineTextAlignment(.trailing)
+            }
+        }
+
+        if p.needsAppId {
+            LabeledContent("App ID") {
+                TextField("App ID", text: $tts.appId)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .multilineTextAlignment(.trailing)
+            }
+        }
+
+        if p != .azure {
+            LabeledContent(p == .volcengine ? L("集群（Cluster）") : L("TTS 模型")) {
+                TextField(p.defaultModel, text: $tts.model)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .multilineTextAlignment(.trailing)
+            }
+        }
+
+        HStack(alignment: .top, spacing: 8) {
+            Text(p.providerNote)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 4)
+            if let u = URL(string: AppInfo.supportURL.absoluteString + "#tts-" + p.rawValue) {
+                Link(L("详细步骤"), destination: u)
+                    .font(.caption2.weight(.semibold))
+            }
+        }
+    }
+
+    private func reloadFromStore() {
+        isReloading = true
+        defer { isReloading = false }
+        ttsProvider = Settings.ttsProvider
+        sysVoice = Settings.systemVoice
+        tts = TTSFields.load(ttsProvider)
+        ttsSpeed = Settings.ttsSpeed
+        narrationStyle = Settings.narrationStyle
+        narrationExtraPrompt = Settings.narrationExtraPrompt
+    }
+
+    private func saveToStore(syncImmediately: Bool) {
+        Settings.ttsProvider = ttsProvider
+        Settings.systemVoice = sysVoice
+        tts.save(ttsProvider)
+        Settings.ttsSpeed = ttsSpeed
+        if Settings.narrationStyle != narrationStyle {
+            Settings.narrationStyle = narrationStyle
+        }
+        if Settings.narrationExtraPrompt != narrationExtraPrompt {
+            Settings.narrationExtraPrompt = narrationExtraPrompt
+        }
+        if narrator.systemVoice != sysVoice {
+            narrator.systemVoice = sysVoice
+        }
+        if narrator.provider != ttsProvider {
+            narrator.provider = ttsProvider
+        }
+        let resolvedVoice = Settings.ttsVoice(ttsProvider)
+        if narrator.voice != resolvedVoice {
+            narrator.voice = resolvedVoice
+        }
+        if abs(narrator.rate - ttsSpeed) > 0.01 {
+            narrator.rate = ttsSpeed
+        }
+        UserDefaults.standard.set(Date(), forKey: "icloud.settings.updatedAt")
+        if syncImmediately {
+            CloudSync.shared.recordSettingsChange()
+        }
+    }
+
+    private func previewVoice() {
+        saveToStore(syncImmediately: true)
+        isPreviewingTTS = true
+        previewStatus = L("合成中…")
+        Task {
+            do {
+                try await narrator.previewVoice()
+                previewStatus = "✅ " + L("试听")
+            } catch {
+                previewStatus = "❌ TTS: " + error.localizedDescription
+            }
+            isPreviewingTTS = false
+        }
+    }
+}
+
+/// Modal sheet for adjusting voice, voice source, and narration style directly from the reader or narration bar.
+struct iOSVoiceSettingsSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                iOSVoiceSettingsSection(targetLang: Settings.targetLang, startExpanded: false)
+            }
+            .scrollContentBackground(.hidden)
+            .background(MN.shelf)
+            .navigationTitle(L("语音与音色设置"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(L("完成")) {
+                        CloudSync.shared.recordSettingsChange()
+                        dismiss()
+                    }
+                }
+            }
         }
     }
 }

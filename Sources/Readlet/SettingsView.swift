@@ -43,26 +43,6 @@ struct SettingsView: View {
 
     @State private var settingsWindow: NSWindow?
 
-    /// per-provider editable fields
-    struct TTSFields: Equatable {
-        var baseURL = "", key = "", model = "", voice = "", region = "", appId = ""
-        var keyManaged = false
-        static func load(_ p: TTSProvider) -> TTSFields {
-            TTSFields(baseURL: Settings.ttsBaseURLOverride(p), key: p.needsOwnKey ? Settings.ttsKey(p) : "",
-                      model: Settings.ttsModel(p), voice: Settings.ttsVoice(p), region: Settings.ttsRegion, appId: Settings.ttsAppId,
-                      keyManaged: Settings.ttsKeyManagedByFile(p))
-        }
-        func save(_ p: TTSProvider) {
-            guard p.isRemote else { return }
-            if p != .gateway { Settings.setTTSBaseURL(baseURL.trimmingCharacters(in: .whitespaces), p) }
-            if p.needsOwnKey, !keyManaged { Settings.setTTSKey(key.trimmingCharacters(in: .whitespacesAndNewlines), p) }
-            if !model.isEmpty || p != .gateway { Settings.setTTSModel(model.trimmingCharacters(in: .whitespaces), p) }
-            Settings.setTTSVoice(voice.trimmingCharacters(in: .whitespaces), p)
-            if p.needsRegion { Settings.ttsRegion = region.trimmingCharacters(in: .whitespaces) }
-            if p.needsAppId { Settings.ttsAppId = appId.trimmingCharacters(in: .whitespaces) }
-        }
-    }
-
     var body: some View {
         VStack(spacing: 0) {
             TabView {

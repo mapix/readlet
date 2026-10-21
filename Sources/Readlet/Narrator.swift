@@ -84,7 +84,7 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
     }
     /// voice of the active remote TTS provider
     @Published var voice: String = Settings.ttsVoice {
-        didSet { if voice != oldValue { Settings.ttsVoice = voice } }
+        didSet { if voice != oldValue { Settings.ttsVoice = voice; refreshBuffered() } }
     }
     /// TTS engine and macOS voice (identifier; "" = automatic)
     @Published var provider: TTSProvider = Settings.ttsProvider {
@@ -138,7 +138,21 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
         }
         return SystemTTS.resolve(systemVoice, target: Settings.targetLang)?.name ?? L("系统语音")
     }
-    func selectVoice(_ id: String) { if effectiveProvider.isRemote { voice = id } else { systemVoice = id } }
+    func selectVoice(_ id: String) {
+        if effectiveProvider.isRemote { voice = id } else { systemVoice = id }
+        CloudSync.shared.recordSettingsChange()
+    }
+    func selectProvider(_ p: TTSProvider) {
+        fallbackToSystem = false
+        fallbackReason = ""
+        if provider != p {
+            provider = p
+        } else {
+            voice = Settings.ttsVoice(p)
+            refreshBuffered()
+        }
+        CloudSync.shared.recordSettingsChange()
+    }
     static let voices = ["Zephyr", "Leda", "Aoede", "Kore", "Puck", "Charon", "Fenrir", "Orus"]
     static let voiceNames = ["Leda": "Leda · 年轻轻松女声", "Aoede": "Aoede · 温柔女声", "Kore": "Kore · 沉稳女声", "Zephyr": "Zephyr · 明亮女声", "Puck": "Puck · 活泼男声", "Charon": "Charon · 知性男声", "Fenrir": "Fenrir · 激昂男声", "Orus": "Orus · 低沉男声"]
     nonisolated static let styleInstruction = "用年轻、轻松、亲切的语气朗读，像和朋友聊天一样自然，语调有起伏，不要播音腔。"
