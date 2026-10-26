@@ -36,10 +36,25 @@ extension RemoteTTS {
 
     private static func one(_ text: String, _ c: TTSConfig, attempts: Int) async throws -> Data {
         var last: Error = TranslateError.bad("TTS")
-        for attempt in 0..<max(1, attempts) {
+        let totalAttempts = max(1, attempts)
+        for attempt in 0..<totalAttempts {
+            try Task.checkCancellation()
             do {
-                let req = try makeRequest(c, text: text)
-                let (data, resp) = try await URLSession.shared.data(for: req)
+                var req = try makeRequest(c, text: text)
+                req.timeoutInterval = text.count < 90 ? 28 : 38
+                let data: Data
+                let resp: URLResponse
+                if attempt == 0 {
+                    (data, resp) = try await URLSession.shared.data(for: req)
+                } else {
+                    req.setValue("close", forHTTPHeaderField: "Connection")
+                    let cfg = URLSessionConfiguration.ephemeral
+                    cfg.timeoutIntervalForRequest = req.timeoutInterval
+                    cfg.timeoutIntervalForResource = req.timeoutInterval + 5
+                    let freshSession = URLSession(configuration: cfg)
+                    defer { freshSession.finishTasksAndInvalidate() }
+                    (data, resp) = try await freshSession.data(for: req)
+                }
                 let http = resp as? HTTPURLResponse
                 let code = http?.statusCode ?? 0
                 if (200..<300).contains(code) {
@@ -50,11 +65,18 @@ extension RemoteTTS {
                 }
                 last = TranslateError.http(code, String(data: data.prefix(300), encoding: .utf8) ?? "")
                 if isConfigError(last) { throw last }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let urlErr as URLError where urlErr.code == .cancelled {
+                throw CancellationError()
             } catch {
                 if isConfigError(error) { throw error }
                 last = error
             }
-            if attempt + 1 < attempts { try? await Task.sleep(nanoseconds: UInt64(800_000_000 * (attempt + 1))) }
+            if attempt + 1 < totalAttempts {
+                try Task.checkCancellation()
+                try? await Task.sleep(nanoseconds: UInt64(500_000_000 * (attempt + 1)))
+            }
         }
         throw last
     }

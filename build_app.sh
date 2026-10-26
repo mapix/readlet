@@ -250,8 +250,9 @@ ditto -c -k --sequesterRsrc --keepParent "$APP" "dist/$NAME-$VERSION.zip"
 
 # Automatically notarize & staple when signed with Developer ID
 if codesign -dvvv "$APP" 2>&1 | grep -q "Authority=Developer ID Application"; then
-  ASC_P8=$(ls "$HOME/.asc/keys/AuthKey_"*.p8 2>/dev/null | head -1 || true)
-  ASC_KEY_ID=$(basename "$ASC_P8" .p8 2>/dev/null | sed 's/^AuthKey_//' || true)
+  ASC_P8="${ASC_KEY_PATH:-$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID:-}.p8}"
+  [ -f "$ASC_P8" ] || ASC_P8=$(ls "$HOME/.appstoreconnect/private_keys/AuthKey_"*.p8 "$HOME/.asc/keys/AuthKey_"*.p8 2>/dev/null | head -1 || true)
+  ASC_KEY_ID="${ASC_KEY_ID:-$(basename "$ASC_P8" .p8 2>/dev/null | sed 's/^AuthKey_//' || true)}"
   ASC_ISSUER_ID="${ASC_ISSUER_ID:-$(asc auth issuer-id 2>/dev/null || true)}"
   if [ -n "${NOTARY_PROFILE:-}" ]; then
     echo "notarizing with profile $NOTARY_PROFILE…"

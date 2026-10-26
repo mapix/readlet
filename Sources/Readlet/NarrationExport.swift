@@ -137,19 +137,41 @@ final class NarrationExporter: ObservableObject {
         let missingScripts = order.filter { cached($0) == nil }
         log("pages \(pageCount) missingScripts \(missingScripts.count)")
 
-        // 2. fill scripts in batches
-        phase = .scripts; total = missingScripts.count; done = 0; detail = missingScripts.isEmpty ? "" : LF("缺 %d 页", missingScripts.count)
-        try await window(missingScripts, width: 4) { p in _ = try? await n.script(for: p) }
+        // 2. If prepareOnly, prepare the current page's script and audio first so playback can start immediately
+        if prepareOnly, let firstPage = order.first {
+            phase = .scripts; total = max(1, missingScripts.count); done = 0; detail = LF("正在准备第 %d 页…", firstPage + 1)
+            let firstSegs = (try? await n.script(for: firstPage)) ?? cached(firstPage) ?? []
+            try Task.checkCancellation()
+            var firstPageAudio: [(Int, Int, String)] = []
+            for (i, s) in firstSegs.enumerated() where !n.hasClip(page: firstPage, seg: i, tag: voice) {
+                firstPageAudio.append((firstPage, i, s.text))
+            }
+            if !firstPageAudio.isEmpty {
+                phase = .audio; total = firstPageAudio.count; done = 0; detail = LF("第 %d 页语音…", firstPage + 1)
+                let firstClip = [firstPageAudio[0]]
+                try await window(firstClip, width: 1) { x in _ = try? await n.audio(page: x.0, seg: x.1, text: x.2, urgent: true) }
+                let restClips = Array(firstPageAudio.dropFirst())
+                if !restClips.isEmpty {
+                    try await window(restClips, width: n.effectiveProvider.isRemote ? 2 : 1) { x in _ = try? await n.audio(page: x.0, seg: x.1, text: x.2) }
+                }
+                try Task.checkCancellation()
+            }
+        }
+
+        // 3. fill remaining scripts in batches
+        let remainingScripts = order.filter { cached($0) == nil }
+        phase = .scripts; total = remainingScripts.count; done = 0; detail = remainingScripts.isEmpty ? "" : LF("缺 %d 页", remainingScripts.count)
+        try await window(remainingScripts, width: 2) { p in _ = try? await n.script(for: p) }
         try Task.checkCancellation()
 
-        // 3. fill audio in batches
+        // 4. fill remaining audio in batches
         var scripts: [Int: [Narrator.Segment]] = [:]
         for p in 0..<pageCount { scripts[p] = cached(p) ?? [] }
         var missingAudio: [(Int, Int, String)] = []
         for p in order { for (i, s) in (scripts[p] ?? []).enumerated() where !n.hasClip(page: p, seg: i, tag: voice) { missingAudio.append((p, i, s.text)) } }
         log("missingAudio \(missingAudio.count)")
         phase = .audio; total = missingAudio.count; done = 0; detail = missingAudio.isEmpty ? "" : LF("缺 %d 段", missingAudio.count)
-        try await window(missingAudio, width: n.effectiveProvider.isRemote ? 5 : 2) { x in _ = try? await n.audio(page: x.0, seg: x.1, text: x.2) }
+        try await window(missingAudio, width: n.effectiveProvider.isRemote ? 2 : 1) { x in _ = try? await n.audio(page: x.0, seg: x.1, text: x.2) }
         try Task.checkCancellation()
 
         if prepareOnly {

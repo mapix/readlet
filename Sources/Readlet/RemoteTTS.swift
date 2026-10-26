@@ -129,7 +129,7 @@ enum RemoteTTS {
             ])
         }
         req.httpMethod = "POST"
-        req.timeoutInterval = 35
+        req.timeoutInterval = 38
         if req.value(forHTTPHeaderField: "Content-Type") == nil { req.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         return req
     }

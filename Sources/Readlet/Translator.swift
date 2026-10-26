@@ -17,6 +17,12 @@ enum Settings {
                 return k
             }
             if let k = Keychain.cached("gateway") { return k }
+            if let data = try? Data(contentsOf: Paths.base.appendingPathComponent("cloud-settings.json")),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let k = nonEmpty(obj["apiKey"] as? String) {
+                _ = Keychain.store(k, "gateway")
+                return k
+            }
             return nonEmpty(env["ANTHROPIC_AUTH_TOKEN"]) ?? nonEmpty(env["ANTHROPIC_API_KEY"]) ?? nonEmpty(env["OPENAI_API_KEY"]) ?? ""
         }
         set {
@@ -125,7 +131,18 @@ enum Settings {
         if p == .gateway { return apiKey }
         let sec = ttsSection(p)
         if ConfigFile.keySource(for: sec) != .none, let k = ConfigFile.apiKey(for: sec) { return k }
+        if let k = nonEmpty(d.string(forKey: "tts.key." + p.rawValue)) {
+            if Keychain.store(k, sec) { d.removeObject(forKey: "tts.key." + p.rawValue) }
+            return k
+        }
         if let k = Keychain.cached(sec) { return k }
+        if let data = try? Data(contentsOf: Paths.base.appendingPathComponent("cloud-settings.json")),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let pKeys = obj["providerKeys"] as? [String: String],
+           let k = nonEmpty(pKeys[p.rawValue]) {
+            _ = Keychain.store(k, sec)
+            return k
+        }
         for e in p.envKeys { if let k = nonEmpty(env[e]) { return k } }
         return ""
     }
@@ -137,7 +154,8 @@ enum Settings {
         guard p.needsOwnKey else { return }
         let sec = ttsSection(p)
         if ConfigFile.keySource(for: sec) == .file { ConfigFile.set([sec + ".api_key": .str(k)]); return }
-        Keychain.store(k, sec)
+        if Keychain.store(k, sec) { d.removeObject(forKey: "tts.key." + p.rawValue) }
+        else { d.set(k, forKey: "tts.key." + p.rawValue) }
     }
 
     /// system voice: synthesize at the narration speed instead of speeding up playback (more natural)

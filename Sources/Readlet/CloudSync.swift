@@ -53,6 +53,7 @@ final class CloudSync: ObservableObject {
         var providerVoices: [String: String]? = nil
         var providerModels: [String: String]? = nil
         var providerBaseURLs: [String: String]? = nil
+        var providerKeys: [String: String]? = nil
     }
 
     @Published var isEnabled: Bool = {
@@ -974,6 +975,7 @@ final class CloudSync: ObservableObject {
                                 newerRemoteSettings = remoteSet
                             } else {
                                 bestSettings.apiKey = remoteSet.apiKey
+                                newerRemoteSettings = bestSettings
                             }
                         }
                     }
@@ -1214,6 +1216,7 @@ final class CloudSync: ObservableObject {
         var pVoices: [String: String] = [:]
         var pModels: [String: String] = [:]
         var pBases: [String: String] = [:]
+        var pKeys: [String: String] = [:]
         for p in TTSProvider.allCases where p.isRemote {
             let v = Settings.ttsVoice(p)
             if !v.isEmpty { pVoices[p.rawValue] = v }
@@ -1222,6 +1225,8 @@ final class CloudSync: ObservableObject {
             if p != .gateway {
                 let b = Settings.ttsBaseURLOverride(p)
                 if !b.isEmpty { pBases[p.rawValue] = b }
+                let pk = Settings.ttsKey(p)
+                if !pk.isEmpty { pKeys[p.rawValue] = pk }
             }
         }
         return CloudSettingsPayload(
@@ -1244,7 +1249,8 @@ final class CloudSync: ObservableObject {
             ttsAppId: Settings.ttsAppId.isEmpty ? nil : Settings.ttsAppId,
             providerVoices: pVoices.isEmpty ? nil : pVoices,
             providerModels: pModels.isEmpty ? nil : pModels,
-            providerBaseURLs: pBases.isEmpty ? nil : pBases
+            providerBaseURLs: pBases.isEmpty ? nil : pBases,
+            providerKeys: pKeys.isEmpty ? nil : pKeys
         )
     }
 
@@ -1269,6 +1275,11 @@ final class CloudSync: ObservableObject {
         if let pBases = s.providerBaseURLs {
             for (raw, b) in pBases {
                 if let p = TTSProvider(rawValue: raw), p != .gateway { Settings.setTTSBaseURL(b, p) }
+            }
+        }
+        if let pKeys = s.providerKeys {
+            for (raw, k) in pKeys where !k.isEmpty {
+                if let p = TTSProvider(rawValue: raw), p != .gateway { Settings.setTTSKey(k, p) }
             }
         }
         if let reg = s.ttsRegion, !reg.isEmpty { Settings.ttsRegion = reg }
