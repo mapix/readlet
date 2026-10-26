@@ -25,6 +25,10 @@ final class VoiceInput {
 
     private func begin(_ onPartial: @escaping (String) -> Void) {
         guard let rec = recognizer, rec.isAvailable else { onPartial(L("（语音识别不可用）")); return }
+        #if os(iOS)
+        try? AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker, .allowBluetoothA2DP])
+        try? AVAudioSession.sharedInstance().setActive(true)
+        #endif
         let req = SFSpeechAudioBufferRecognitionRequest()
         req.shouldReportPartialResults = true
         if rec.supportsOnDeviceRecognition { req.requiresOnDeviceRecognition = true }
@@ -35,7 +39,13 @@ final class VoiceInput {
         input.removeTap(onBus: 0)
         input.installTap(onBus: 0, bufferSize: 1024, format: fmt) { buf, _ in req.append(buf) }
         engine.prepare()
-        do { try engine.start() } catch { onPartial(LF("（无法使用麦克风：%@）", error.localizedDescription)); return }
+        do { try engine.start() } catch {
+            #if os(iOS)
+            Narrator.configurePlaybackAudioSession()
+            #endif
+            onPartial(LF("（无法使用麦克风：%@）", error.localizedDescription))
+            return
+        }
         task = rec.recognitionTask(with: req) { [weak self] result, err in
             Task { @MainActor in
                 guard let self else { return }
@@ -57,6 +67,9 @@ final class VoiceInput {
         guard let f = finish else { return }
         finish = nil
         task?.cancel(); task = nil; request = nil
+        #if os(iOS)
+        Narrator.configurePlaybackAudioSession()
+        #endif
         f(latest)
     }
 }

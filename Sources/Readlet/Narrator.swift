@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import MediaPlayer
 import PDFKit
 #if os(macOS)
 import AppKit
@@ -27,6 +28,36 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
     /// raw WAV of the segment currently loaded (to rebuild the player when crossing the 2x limit)
     private var currentWav: Data?
 
+    #if os(iOS)
+    private var keepAlivePlayer: AVAudioPlayer?
+    private var bgTaskId: UIBackgroundTaskIdentifier = .invalid
+    private var wasPlayingBeforeInterruption = false
+    private var cachedArtworkDocId: UUID?
+    private var cachedArtwork: MPMediaItemArtwork?
+
+    nonisolated static func configurePlaybackAudioSession(activate: Bool = true) {
+        let session = AVAudioSession.sharedInstance()
+        if session.category != .playback || session.mode != .spokenAudio {
+            do {
+                try session.setCategory(.playback, mode: .spokenAudio, policy: .longFormAudio, options: [])
+            } catch {
+                try? session.setCategory(.playback, mode: .spokenAudio, options: [])
+            }
+        }
+        if activate {
+            try? session.setActive(true)
+        }
+    }
+    #endif
+
+    override init() {
+        super.init()
+        #if os(iOS)
+        setupRemoteTransportControls()
+        setupAudioSessionNotifications()
+        #endif
+    }
+
     /// AVAudioPlayer tops out at 2x: above that, time-stretch the clip (pitch preserved) and play it at 2x
     /// system-voice clips are synthesized at the target speed (natural prosody) and played at 1×
     var nativeSpeed: Bool { effectiveProvider == .system && Settings.systemNativeRate }
@@ -35,8 +66,7 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
 
     func makePlayer(_ wav: Data) throws -> AVAudioPlayer {
         #if os(iOS)
-        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio, options: [.allowBluetoothA2DP, .defaultToSpeaker])
-        try? AVAudioSession.sharedInstance().setActive(true)
+        Narrator.configurePlaybackAudioSession(activate: true)
         #endif
         let rate = playerRate
         var data = wav
@@ -53,10 +83,19 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
         if nativeSpeed {
             // the speed is baked into system-voice clips: upcoming clips are re-synthesized at the new speed
             if docId != nil, state != .idle { prefetch(page: page, from: segIndex + 1) }
+            #if os(iOS)
+            updateNowPlayingInfo()
+            #endif
             return
         }
         guard let pl = player else { return }
-        if (old > 2) == (rate > 2) && rate <= 2 { pl.rate = rate; return }
+        if (old > 2) == (rate > 2) && rate <= 2 {
+            pl.rate = rate
+            #if os(iOS)
+            updateNowPlayingInfo()
+            #endif
+            return
+        }
         // crossing / within the stretched range: rebuild at the same relative position
         guard let wav = currentWav, let np = try? makePlayer(wav) else { pl.rate = min(rate, 2); return }
         let frac = pl.duration > 0 ? pl.currentTime / pl.duration : 0
@@ -66,6 +105,9 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
         np.currentTime = frac * np.duration
         player = np
         if wasPlaying { np.play() }
+        #if os(iOS)
+        updateNowPlayingInfo()
+        #endif
     }
 
     static func wavData(_ samples: [Int16], rate: Int) -> Data {
@@ -158,6 +200,13 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
     nonisolated static let styleInstruction = "用年轻、轻松、亲切的语气朗读，像和朋友聊天一样自然，语调有起伏，不要播音腔。"
     /// reader of the window showing the narrated document
     static var reader: ReaderController { DocWindows.shared.entries[shared.docId ?? UUID()]?.reader ?? ReaderController.shared }
+    /// reader actively bound to the narrated document (nil if the user closed the reader or opened a different document)
+    static var activeReader: ReaderController? {
+        guard let id = shared.docId else { return nil }
+        if let r = DocWindows.shared.entries[id]?.reader, r.docId == id { return r }
+        if ReaderController.shared.docId == id { return ReaderController.shared }
+        return nil
+    }
 
     private var player: AVAudioPlayer?
     private var doc: PDFDocument?
@@ -300,6 +349,10 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
         pageCount = doc.pageCount
         error = nil
         guard pageCount > 0 else { return }
+        #if os(iOS)
+        Narrator.configurePlaybackAudioSession(activate: true)
+        startKeepAlive()
+        #endif
         let targetPage = max(0, min(pageCount - 1, page))
         if resume, let s = Narrator.savedProgress(docId), s.page >= 0, s.page < pageCount {
             if s.page == targetPage && s.seg > 0 {
@@ -319,7 +372,7 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
     /// ignore the saved position and start at the page currently shown in the reader (from segment 0)
     func restartFromCurrentPage() {
         guard let id = docId, let d = doc else { return }
-        let curPage = Narrator.reader.currentPageIndex
+        let curPage = Narrator.activeReader?.currentPageIndex ?? page
         Narrator.clearProgress(id)
         start(docId: id, doc: d, title: title, from: curPage, resume: false)
     }
@@ -373,14 +426,37 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
 
     func togglePause() {
         switch state {
-        case .playing: player?.pause(); state = .paused
+        case .playing:
+            player?.pause()
+            state = .paused
+            #if os(iOS)
+            stopKeepAlive()
+            endBackgroundTransitionTask()
+            updateNowPlayingInfo()
+            #endif
+        case .preparing:
+            runToken = UUID()
+            player?.pause()
+            state = .paused
+            #if os(iOS)
+            stopKeepAlive()
+            endBackgroundTransitionTask()
+            updateNowPlayingInfo()
+            #endif
         case .paused:
+            #if os(iOS)
+            Narrator.configurePlaybackAudioSession(activate: true)
+            startKeepAlive()
+            #endif
             if let p = player {
                 if segIndex < segments.count {
-                    Narrator.reader.highlightNarration(page: page, quote: segments[segIndex].focus)
+                    Narrator.activeReader?.highlightNarration(page: page, quote: segments[segIndex].focus)
                 }
                 p.play()
                 state = .playing
+                #if os(iOS)
+                updateNowPlayingInfo()
+                #endif
             } else { play(page: page, seg: segIndex) }
         default: break
         }
@@ -405,6 +481,12 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
         player?.stop(); player = nil
         state = .idle
         segments = []; segIndex = 0
+        #if os(iOS)
+        wasPlayingBeforeInterruption = false
+        stopKeepAlive()
+        endBackgroundTransitionTask()
+        updateNowPlayingInfo()
+        #endif
     }
 
     func next() { guard state != .idle else { return }; advance() }
@@ -548,8 +630,13 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
         error = nil
         page = p
         state = .preparing
-        if Narrator.reader.currentPageIndex != p && Narrator.reader.focusedNarrationPage != p {
-            Narrator.reader.goToPage(p)
+        #if os(iOS)
+        Narrator.configurePlaybackAudioSession(activate: true)
+        startKeepAlive()
+        beginBackgroundTransitionTask()
+        #endif
+        if let r = Narrator.activeReader, r.currentPageIndex != p && r.focusedNarrationPage != p {
+            r.goToPage(p)
         }
         if let cached = cachedScript(p), !ScriptParser.looksBroken(cached.map(\.text)), !cached.isEmpty {
             segments = cached
@@ -558,6 +645,9 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
             segments = []
             segIndex = 0
         }
+        #if os(iOS)
+        updateNowPlayingInfo()
+        #endif
         Task {
             do {
                 let segs = try await script(for: p)
@@ -568,8 +658,13 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
                 segIndex = i
                 if let id = docId { Narrator.saveProgress(id, page: p, seg: i) }
                 let t = segs[i].text
-                Narrator.reader.segmentMentionsFigure = t.range(of: "(图|表|横轴|纵轴|曲线|柱状|折线|示意|figure|table)", options: [.regularExpression, .caseInsensitive]) != nil
-                Narrator.reader.highlightNarration(page: p, quote: segs[i].focus)
+                if let r = Narrator.activeReader {
+                    r.segmentMentionsFigure = t.range(of: "(图|表|横轴|纵轴|曲线|柱状|折线|示意|figure|table)", options: [.regularExpression, .caseInsensitive]) != nil
+                    r.highlightNarration(page: p, quote: segs[i].focus)
+                }
+                #if os(iOS)
+                updateNowPlayingInfo()
+                #endif
                 // Synthesize the urgent current segment FIRST before starting look-ahead prefetch
                 let wav = try await audio(page: p, seg: i, text: segs[i].text, urgent: true)
                 guard token == runToken else { return }
@@ -578,9 +673,13 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
                 currentWav = wav
                 player = pl
                 state = .playing
-                Narrator.reader.highlightNarration(page: p, quote: segs[i].focus)
+                Narrator.activeReader?.highlightNarration(page: p, quote: segs[i].focus)
                 if recording { recorded.insert("\(p)-\(i)") }
                 pl.play()
+                #if os(iOS)
+                updateNowPlayingInfo()
+                endBackgroundTransitionTask()
+                #endif
                 // Start look-ahead buffering only after the current segment is actively playing
                 prefetch(page: p, from: i + 1)
             } catch is CancellationError {
@@ -589,6 +688,11 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
                 guard token == runToken else { return }
                 self.error = error.localizedDescription
                 state = .paused
+                #if os(iOS)
+                stopKeepAlive()
+                endBackgroundTransitionTask()
+                updateNowPlayingInfo()
+                #endif
             }
         }
     }
@@ -598,7 +702,17 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
             if self.player === p { self.advance() }
             else if self.qaPlayer === p {
                 self.qaPlayer = nil
-                if self.resumeAfterQA, self.state == .paused { self.player?.play(); self.state = .playing }
+                if self.resumeAfterQA, self.state == .paused {
+                    #if os(iOS)
+                    Narrator.configurePlaybackAudioSession(activate: true)
+                    self.startKeepAlive()
+                    #endif
+                    self.player?.play()
+                    self.state = .playing
+                    #if os(iOS)
+                    self.updateNowPlayingInfo()
+                    #endif
+                }
             }
         }
     }
@@ -611,7 +725,7 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
         if page + 1 < pageCount { play(page: page + 1, seg: 0) }
         else {
             if let id = docId { Narrator.clearProgress(id) }     // finished the document: next start begins fresh
-            stop(); resumedFrom = nil; Narrator.reader.clearNarrationHighlight()
+            stop(); resumedFrom = nil; Narrator.activeReader?.clearNarrationHighlight()
         }
     }
 
@@ -912,5 +1026,283 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
     static func jpeg(of page: PDFPage) -> Data {
         PlatformPDF.thumbnailJPEG(page, maxDimension: 1400, quality: 0.72)
     }
+
+    #if os(iOS)
+    // MARK: - iOS Podcast Background Playback, Now Playing & Remote Commands
+
+    /// Keeps a near-zero dithered PCM stream active across async segment/page transitions so iOS never suspends
+    /// the app while awaiting LLM script generation or remote TTS synthesis in the background.
+    private func startKeepAlive() {
+        if let kp = keepAlivePlayer, kp.isPlaying { return }
+        if keepAlivePlayer == nil {
+            let sampleRate = 8000
+            var samples = [Int16](repeating: 0, count: sampleRate)
+            for idx in 0..<samples.count {
+                samples[idx] = (idx & 1) == 0 ? 1 : -1
+            }
+            let wav = Narrator.wavData(samples, rate: sampleRate)
+            if let kp = try? AVAudioPlayer(data: wav) {
+                kp.numberOfLoops = -1
+                kp.volume = 0.01
+                kp.prepareToPlay()
+                keepAlivePlayer = kp
+            }
+        }
+        keepAlivePlayer?.play()
+    }
+
+    private func stopKeepAlive() {
+        keepAlivePlayer?.stop()
+    }
+
+    private func beginBackgroundTransitionTask() {
+        endBackgroundTransitionTask()
+        bgTaskId = UIApplication.shared.beginBackgroundTask(withName: "ReadletNarrationTransition") { [weak self] in
+            Task { @MainActor in
+                self?.endBackgroundTransitionTask()
+            }
+        }
+    }
+
+    private func endBackgroundTransitionTask() {
+        guard bgTaskId != .invalid else { return }
+        let id = bgTaskId
+        bgTaskId = .invalid
+        UIApplication.shared.endBackgroundTask(id)
+    }
+
+    private func setupRemoteTransportControls() {
+        let cc = MPRemoteCommandCenter.shared()
+
+        cc.playCommand.isEnabled = true
+        cc.playCommand.addTarget { [weak self] _ in
+            guard let self else { return .commandFailed }
+            Task { @MainActor in
+                if self.state == .paused { self.togglePause() }
+            }
+            return .success
+        }
+
+        cc.pauseCommand.isEnabled = true
+        cc.pauseCommand.addTarget { [weak self] _ in
+            guard let self else { return .commandFailed }
+            Task { @MainActor in
+                if self.state == .playing || self.state == .preparing { self.togglePause() }
+            }
+            return .success
+        }
+
+        cc.togglePlayPauseCommand.isEnabled = true
+        cc.togglePlayPauseCommand.addTarget { [weak self] _ in
+            guard let self else { return .commandFailed }
+            Task { @MainActor in
+                self.togglePause()
+            }
+            return .success
+        }
+
+        cc.nextTrackCommand.isEnabled = true
+        cc.nextTrackCommand.addTarget { [weak self] _ in
+            guard let self else { return .commandFailed }
+            Task { @MainActor in
+                self.next()
+            }
+            return .success
+        }
+
+        cc.previousTrackCommand.isEnabled = true
+        cc.previousTrackCommand.addTarget { [weak self] _ in
+            guard let self else { return .commandFailed }
+            Task { @MainActor in
+                self.previous()
+            }
+            return .success
+        }
+
+        cc.skipForwardCommand.isEnabled = true
+        cc.skipForwardCommand.preferredIntervals = [15]
+        cc.skipForwardCommand.addTarget { [weak self] event in
+            guard let self else { return .commandFailed }
+            let step = (event as? MPSkipIntervalCommandEvent)?.interval ?? 15
+            Task { @MainActor in
+                if let pl = self.player, pl.duration > 0, pl.currentTime + step < pl.duration - 0.5 {
+                    pl.currentTime += step
+                    self.updateNowPlayingInfo()
+                } else {
+                    self.next()
+                }
+            }
+            return .success
+        }
+
+        cc.skipBackwardCommand.isEnabled = true
+        cc.skipBackwardCommand.preferredIntervals = [15]
+        cc.skipBackwardCommand.addTarget { [weak self] event in
+            guard let self else { return .commandFailed }
+            let step = (event as? MPSkipIntervalCommandEvent)?.interval ?? 15
+            Task { @MainActor in
+                if let pl = self.player, pl.currentTime > step {
+                    pl.currentTime -= step
+                    self.updateNowPlayingInfo()
+                } else if let pl = self.player, pl.currentTime > 3 {
+                    pl.currentTime = 0
+                    self.updateNowPlayingInfo()
+                } else {
+                    self.previous()
+                }
+            }
+            return .success
+        }
+
+        cc.changePlaybackPositionCommand.isEnabled = true
+        cc.changePlaybackPositionCommand.addTarget { [weak self] event in
+            guard let self, let posEvent = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
+            Task { @MainActor in
+                if let pl = self.player, pl.duration > 0 {
+                    pl.currentTime = max(0, min(pl.duration, posEvent.positionTime))
+                    self.updateNowPlayingInfo()
+                }
+            }
+            return .success
+        }
+
+        cc.changePlaybackRateCommand.isEnabled = true
+        cc.changePlaybackRateCommand.supportedPlaybackRates = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
+        cc.changePlaybackRateCommand.addTarget { [weak self] event in
+            guard let self, let rateEvent = event as? MPChangePlaybackRateCommandEvent else { return .commandFailed }
+            Task { @MainActor in
+                self.rate = rateEvent.playbackRate
+            }
+            return .success
+        }
+    }
+
+    private func setupAudioSessionNotifications() {
+        NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] note in
+            let typeVal = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+            let optVal = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt
+            Task { @MainActor in
+                guard let self, let typeVal, let type = AVAudioSession.InterruptionType(rawValue: typeVal) else { return }
+                switch type {
+                case .began:
+                    if self.state == .playing || self.state == .preparing {
+                        self.wasPlayingBeforeInterruption = true
+                        self.player?.pause()
+                        self.stopKeepAlive()
+                        self.state = .paused
+                        self.updateNowPlayingInfo()
+                    }
+                case .ended:
+                    guard self.wasPlayingBeforeInterruption else { return }
+                    self.wasPlayingBeforeInterruption = false
+                    let options = AVAudioSession.InterruptionOptions(rawValue: optVal ?? 0)
+                    if options.contains(.shouldResume) || self.state == .paused {
+                        Narrator.configurePlaybackAudioSession(activate: true)
+                        self.togglePause()
+                    }
+                @unknown default:
+                    break
+                }
+            }
+        }
+
+        NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] note in
+            let reasonVal = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
+            Task { @MainActor in
+                guard let self, let reasonVal, let reason = AVAudioSession.RouteChangeReason(rawValue: reasonVal) else { return }
+                if reason == .oldDeviceUnavailable, self.state == .playing {
+                    self.togglePause()
+                }
+            }
+        }
+    }
+
+    private func artworkForCurrentDoc() -> MPMediaItemArtwork? {
+        guard let id = docId else { return nil }
+        if cachedArtworkDocId == id, let art = cachedArtwork { return art }
+        var sourceImg: UIImage?
+        let thumbURL = Paths.docDir(id).appendingPathComponent("thumb.png")
+        if let d = try? Data(contentsOf: thumbURL), let img = UIImage(data: d) {
+            sourceImg = img
+        } else if let pg = (sourceDoc ?? doc)?.safePage(0),
+                  let img = UIImage(data: PlatformPDF.thumbnailJPEG(pg, maxDimension: 512, quality: 0.8)) {
+            sourceImg = img
+        }
+        guard let src = sourceImg else { return nil }
+        let canvasSize = CGSize(width: 600, height: 600)
+        let renderer = UIGraphicsImageRenderer(size: canvasSize)
+        let squareImg = renderer.image { ctx in
+            let cg = ctx.cgContext
+            UIColor(red: 0.11, green: 0.13, blue: 0.18, alpha: 1.0).setFill()
+            cg.fill(CGRect(origin: .zero, size: canvasSize))
+            let inset: CGFloat = 44
+            let availW = canvasSize.width - inset * 2
+            let availH = canvasSize.height - inset * 2
+            let scale = min(availW / max(1, src.size.width), availH / max(1, src.size.height))
+            let drawW = src.size.width * scale
+            let drawH = src.size.height * scale
+            let rect = CGRect(
+                x: (canvasSize.width - drawW) / 2,
+                y: (canvasSize.height - drawH) / 2,
+                width: drawW,
+                height: drawH
+            )
+            cg.saveGState()
+            cg.setShadow(offset: CGSize(width: 0, height: 10), blur: 24, color: UIColor.black.withAlphaComponent(0.45).cgColor)
+            UIBezierPath(roundedRect: rect, cornerRadius: 12).addClip()
+            src.draw(in: rect)
+            cg.restoreGState()
+        }
+        let art = MPMediaItemArtwork(boundsSize: canvasSize) { _ in squareImg }
+        cachedArtworkDocId = id
+        cachedArtwork = art
+        return art
+    }
+
+    func updateNowPlayingInfo() {
+        guard state != .idle, docId != nil else {
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+            return
+        }
+        var info: [String: Any] = [:]
+        let segTitle: String
+        if segIndex < segments.count {
+            segTitle = segments[segIndex].text
+        } else if state == .preparing {
+            segTitle = L("正在阅读本页并组织讲解…")
+        } else {
+            segTitle = title
+        }
+        info[MPMediaItemPropertyTitle] = segTitle
+        info[MPMediaItemPropertyArtist] = "\(title) · p.\(page + 1)/\(max(1, pageCount))"
+        info[MPMediaItemPropertyAlbumTitle] = "Readlet · \(L("AI 语音解读"))"
+        info[MPMediaItemPropertyAlbumTrackNumber] = segIndex + 1
+        info[MPMediaItemPropertyAlbumTrackCount] = max(1, segments.count)
+        info[MPNowPlayingInfoPropertyMediaType] = MPNowPlayingInfoMediaType.audio.rawValue
+        info[MPNowPlayingInfoPropertyDefaultPlaybackRate] = 1.0
+        if let pl = player, pl.duration > 0 {
+            info[MPMediaItemPropertyPlaybackDuration] = pl.duration
+            info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = pl.currentTime
+            info[MPNowPlayingInfoPropertyPlaybackRate] = state == .playing ? Double(pl.rate) : 0.0
+        } else {
+            info[MPMediaItemPropertyPlaybackDuration] = 0.0
+            info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = 0.0
+            info[MPNowPlayingInfoPropertyPlaybackRate] = state == .playing ? Double(playerRate) : 0.0
+        }
+        if let art = artworkForCurrentDoc() {
+            info[MPMediaItemPropertyArtwork] = art
+        }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    }
+    #endif
 }
+
 

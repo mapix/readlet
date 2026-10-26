@@ -70,6 +70,7 @@ struct iOSRootView: View {
     @ObservedObject var wins = DocWindows.shared
     @ObservedObject var lang = LangCenter.shared
     @ObservedObject var themeCenter = iOSThemeCenter.shared
+    @ObservedObject var narrator = Narrator.shared
 
     @State private var selectedTab = 0
     @State private var activeReaderDocId: UUID?
@@ -80,51 +81,71 @@ struct iOSRootView: View {
                 iOSDocumentStudyView(
                     store: store,
                     docId: docId,
-                    onClose: { activeReaderDocId = nil }
+                    onClose: { activeReaderDocId = nil },
+                    onSwitchDoc: { targetId in
+                        DocWindows.shared.open(targetId)
+                        activeReaderDocId = targetId
+                    }
                 )
                 .id(docId)
             } else {
-                TabView(selection: $selectedTab) {
-                    iOSBookshelfView(
-                        store: store,
-                        cloud: cloud,
-                        onOpenDoc: { id in
-                            DocWindows.shared.open(id)
-                            activeReaderDocId = id
-                        },
-                        onOpenNotebookMindMap: { nbId in
-                            store.currentNotebookId = nbId
-                            selectedTab = 1
+                ZStack(alignment: .bottom) {
+                    TabView(selection: $selectedTab) {
+                        iOSBookshelfView(
+                            store: store,
+                            cloud: cloud,
+                            onOpenDoc: { id in
+                                DocWindows.shared.open(id)
+                                activeReaderDocId = id
+                            },
+                            onOpenNotebookMindMap: { nbId in
+                                store.currentNotebookId = nbId
+                                selectedTab = 1
+                            }
+                        )
+                        .tabItem {
+                            Label(L("书架"), systemImage: "books.vertical.fill")
                         }
-                    )
-                    .tabItem {
-                        Label(L("书架"), systemImage: "books.vertical.fill")
-                    }
-                    .tag(0)
+                        .tag(0)
 
-                    iOSMindMapTabView(
-                        store: store,
-                        onJumpToDoc: { id in
-                            DocWindows.shared.open(id)
-                            activeReaderDocId = id
+                        iOSMindMapTabView(
+                            store: store,
+                            onJumpToDoc: { id in
+                                DocWindows.shared.open(id)
+                                activeReaderDocId = id
+                            }
+                        )
+                        .tabItem {
+                            Label(L("脑图"), systemImage: "point.3.connected.trianglepath.dotted")
                         }
-                    )
-                    .tabItem {
-                        Label(L("脑图"), systemImage: "point.3.connected.trianglepath.dotted")
-                    }
-                    .tag(1)
+                        .tag(1)
 
-                    iOSFlashcardsTabView(store: store)
-                    .tabItem {
-                        Label(L("闪卡"), systemImage: "rectangle.on.rectangle.angled")
-                    }
-                    .tag(2)
+                        iOSFlashcardsTabView(store: store)
+                        .tabItem {
+                            Label(L("闪卡"), systemImage: "rectangle.on.rectangle.angled")
+                        }
+                        .tag(2)
 
-                    iOSSettingsView(store: store, cloud: cloud)
-                    .tabItem {
-                        Label(L("设置与同步"), systemImage: "icloud.and.arrow.up")
+                        iOSSettingsView(store: store, cloud: cloud)
+                        .tabItem {
+                            Label(L("设置与同步"), systemImage: "icloud.and.arrow.up")
+                        }
+                        .tag(3)
                     }
-                    .tag(3)
+
+                    if narrator.state != .idle, let nDocId = narrator.docId, store.doc(nDocId) != nil {
+                        iOSPodcastMiniPlayerBar(
+                            store: store,
+                            narrator: narrator,
+                            onOpenNarratedDoc: {
+                                DocWindows.shared.open(nDocId)
+                                activeReaderDocId = nDocId
+                            }
+                        )
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 64)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
                 }
             }
         }
@@ -185,6 +206,13 @@ struct iOSRootView: View {
                 let second = store.lib.docs[1]
                 DocWindows.shared.open(second.id)
                 activeReaderDocId = second.id
+            }
+            if args.contains("--podcast-first") {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    if let first = store.lib.docs.first, let ses = store.session(first.id) {
+                        Narrator.shared.start(docId: first.id, doc: ses.original, title: first.title, from: first.resolvedReadPage ?? 0, resume: true)
+                    }
+                }
             }
         }
     }
@@ -848,10 +876,23 @@ struct iOSNotebookDocsSheet: View {
 
 struct iOSDocCardView: View {
     @ObservedObject var store: Store
+    @ObservedObject private var narrator = Narrator.shared
     let doc: Doc
     var activeNotebookId: UUID? = nil
     let onTap: () -> Void
     let onAddCustomTag: () -> Void
+
+    private var isNarratingThisDoc: Bool {
+        narrator.state != .idle && narrator.docId == doc.id
+    }
+
+    private func togglePodcastForDoc() {
+        if isNarratingThisDoc {
+            narrator.togglePause()
+        } else if let ses = store.session(doc.id) {
+            narrator.start(docId: doc.id, doc: ses.original, title: doc.title, from: doc.resolvedReadPage ?? 0, resume: true)
+        }
+    }
 
     private func statusColor(_ st: DocStatusTag?) -> Color {
         switch st {
@@ -870,7 +911,7 @@ struct iOSDocCardView: View {
                     .frame(maxWidth: .infinity)
                     .background(Color.white)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
-                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.black.opacity(0.08), lineWidth: 0.6))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(isNarratingThisDoc ? MN.accent : Color.black.opacity(0.08), lineWidth: isNarratingThisDoc ? 1.6 : 0.6))
 
                 Button {
                     store.cycleStatusTag(doc.id)
@@ -888,6 +929,25 @@ struct iOSDocCardView: View {
                     .foregroundStyle(.white)
                 }
                 .padding(8)
+
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        Button {
+                            togglePodcastForDoc()
+                        } label: {
+                            Image(systemName: isNarratingThisDoc ? (narrator.state == .playing ? "waveform" : "pause.fill") : "headphones")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 28, height: 28)
+                                .background(Circle().fill(isNarratingThisDoc ? MN.accent : Color.black.opacity(0.58)))
+                                .shadow(color: .black.opacity(0.22), radius: 4, y: 2)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(8)
+                    }
+                }
             }
             .onTapGesture { onTap() }
 
@@ -939,6 +999,11 @@ struct iOSDocCardView: View {
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.06), lineWidth: 0.6))
         .contextMenu {
             Button { onTap() } label: { Label(L("打开阅读"), systemImage: "book") }
+            Button {
+                togglePodcastForDoc()
+            } label: {
+                Label(isNarratingThisDoc ? (narrator.state == .playing ? L("暂停解读") : L("继续解读")) : L("AI 语音解读"), systemImage: isNarratingThisDoc ? "waveform" : "headphones")
+            }
             Divider()
             ForEach(DocStatusTag.allCases) { st in
                 Button {
@@ -1036,6 +1101,7 @@ struct iOSDocumentStudyView: View {
     @ObservedObject var store: Store
     let docId: UUID
     let onClose: () -> Void
+    var onSwitchDoc: ((UUID) -> Void)? = nil
 
     @ObservedObject private var rc = ReaderController.shared
     @ObservedObject private var narrator = Narrator.shared
@@ -1100,6 +1166,15 @@ struct iOSDocumentStudyView: View {
                                 onOpenVoiceSettings: { showVoiceSettingsSheet = true }
                             )
                             .padding(.horizontal, 12)
+                        } else if narrator.state != .idle, let nDocId = narrator.docId, nDocId != docId, store.doc(nDocId) != nil {
+                            iOSPodcastMiniPlayerBar(
+                                store: store,
+                                narrator: narrator,
+                                onOpenNarratedDoc: {
+                                    onSwitchDoc?(nDocId)
+                                }
+                            )
+                            .padding(.horizontal, 12)
                         }
 
                         bottomReaderControlBar
@@ -1110,6 +1185,16 @@ struct iOSDocumentStudyView: View {
             .onAppear {
                 rc.bind(docId: docId)
                 DocWindows.shared.activeDocId = docId
+                if narrator.state != .idle && narrator.docId == docId {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        if rc.currentPageIndex != narrator.page {
+                            rc.goToPage(narrator.page)
+                        }
+                        if narrator.segIndex < narrator.segments.count {
+                            rc.highlightNarration(page: narrator.page, quote: narrator.segments[narrator.segIndex].focus)
+                        }
+                    }
+                }
                 if ProcessInfo.processInfo.arguments.contains("--narrate") {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                         if narrator.state == .idle {
@@ -1952,6 +2037,172 @@ struct iOSNarratorBar: View {
         .overlay(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(MN.accent.opacity(colorScheme == .dark ? 0.45 : 0.35), lineWidth: 1.5)
+        )
+    }
+}
+
+struct iOSPodcastMiniPlayerBar: View {
+    @ObservedObject var store: Store
+    @ObservedObject var narrator: Narrator
+    let onOpenNarratedDoc: () -> Void
+    @ObservedObject private var themeCenter = iOSThemeCenter.shared
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var currentSubtitle: String {
+        if narrator.segIndex < narrator.segments.count {
+            return narrator.segments[narrator.segIndex].text
+        }
+        if narrator.state == .preparing {
+            return L("正在阅读本页并组织讲解…")
+        }
+        return L("AI 语音解读中…")
+    }
+
+    private var surfaceColor: Color {
+        switch themeCenter.theme {
+        case .dark:
+            return Color(red: 0.13, green: 0.15, blue: 0.20)
+        case .sepia:
+            return Color(red: 0.95, green: 0.90, blue: 0.80)
+        case .light:
+            return Color(red: 0.96, green: 0.975, blue: 1.0)
+        }
+    }
+
+    private var thumbImage: UIImage? {
+        guard let id = narrator.docId else { return nil }
+        let u = Paths.docDir(id).appendingPathComponent("thumb.png")
+        if let d = try? Data(contentsOf: u), let img = UIImage(data: d) {
+            return img
+        }
+        return nil
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button(action: onOpenNarratedDoc) {
+                HStack(spacing: 10) {
+                    ZStack(alignment: .bottomTrailing) {
+                        if let img = thumbImage {
+                            Image(uiImage: img)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: 38, height: 48)
+                                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                        .stroke(Color.primary.opacity(0.12), lineWidth: 0.5)
+                                )
+                        } else {
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(MN.accent.opacity(0.16))
+                                .frame(width: 38, height: 48)
+                                .overlay(
+                                    Image(systemName: "waveform")
+                                        .font(.subheadline.weight(.bold))
+                                        .foregroundStyle(MN.accent)
+                                )
+                        }
+
+                        Circle()
+                            .fill(MN.accent)
+                            .frame(width: 16, height: 16)
+                            .overlay(
+                                Image(systemName: narrator.state == .playing ? "waveform" : "headphones")
+                                    .font(.system(size: 8, weight: .bold))
+                                    .foregroundStyle(.white)
+                            )
+                            .offset(x: 3, y: 3)
+                    }
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 6) {
+                            Text(narrator.narratedTitle.isEmpty ? (store.doc(narrator.docId ?? UUID())?.title ?? "") : narrator.narratedTitle)
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+
+                            Text("p.\(narrator.page + 1)/\(max(1, narrator.pageCount))")
+                                .font(.caption2.monospacedDigit().weight(.semibold))
+                                .foregroundStyle(MN.accent)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1.5)
+                                .background(Capsule().fill(MN.accent.opacity(0.14)))
+                        }
+
+                        Text(currentSubtitle)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            HStack(spacing: 6) {
+                Button {
+                    narrator.previous()
+                } label: {
+                    Image(systemName: "backward.fill")
+                        .font(.caption.weight(.semibold))
+                        .frame(width: 28, height: 28)
+                        .background(Circle().fill(Color.primary.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    narrator.togglePause()
+                } label: {
+                    Group {
+                        if narrator.state == .preparing {
+                            ProgressView()
+                                .tint(.white)
+                                .scaleEffect(0.75)
+                        } else {
+                            Image(systemName: narrator.state == .playing ? "pause.fill" : "play.fill")
+                                .font(.subheadline.weight(.bold))
+                                .foregroundStyle(.white)
+                        }
+                    }
+                    .frame(width: 34, height: 34)
+                    .background(Circle().fill(MN.accent))
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    narrator.next()
+                } label: {
+                    Image(systemName: "forward.fill")
+                        .font(.caption.weight(.semibold))
+                        .frame(width: 28, height: 28)
+                        .background(Circle().fill(Color.primary.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    narrator.stop()
+                    ReaderController.shared.clearNarrationHighlight()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(surfaceColor)
+                .shadow(color: .black.opacity(colorScheme == .dark ? 0.45 : 0.18), radius: 14, y: 5)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(MN.accent.opacity(colorScheme == .dark ? 0.45 : 0.35), lineWidth: 1.2)
         )
     }
 }

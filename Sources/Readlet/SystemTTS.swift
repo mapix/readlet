@@ -342,8 +342,7 @@ private final class SystemTTSJob: NSObject, AVSpeechSynthesizerDelegate, @unchec
         continuation = c
         keepAlive = self
         #if os(iOS)
-        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio, options: [.allowBluetoothA2DP, .defaultToSpeaker])
-        try? AVAudioSession.sharedInstance().setActive(true)
+        Narrator.configurePlaybackAudioSession()
         #endif
         synth.delegate = self
         synth.write(u) { [weak self] buf in self?.receive(buf) }
