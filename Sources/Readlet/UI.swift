@@ -312,6 +312,10 @@ struct StudyToolbar: View {
                 Divider()
                 Button(L("导出双语 PDF…")) { exportBilingual() }
                 Button(L("导出脑图为 Markdown…")) { exportMarkdown() }
+                if let id = rc.docId, let d = store.doc(id) {
+                    Divider()
+                    DocProgressAndMediaMenuItems(store: store, doc: d, onJump: { p in rc.goToPage(p) })
+                }
                 Divider()
                 Picker(L("主题"), selection: Binding(get: { AppTheme.current }, set: { ThemeCenter.shared.set($0) })) {
                     ForEach(AppTheme.allCases) { Text($0.name).tag($0) }
@@ -891,6 +895,11 @@ struct LibraryView: View {
                 Button(L("重新从网页导入")) { WebImportPanel.show(notebook: notebook, url: s) }
             }
             Divider()
+            DocProgressAndMediaMenuItems(store: store, doc: d, onJump: { p in
+                store.restoreProgressSnapshot(d.id, page: p)
+                DocWindows.shared.open(d.id, notebook: notebook)
+            })
+            Divider()
             Button(L("删除文档"), role: .destructive) { DocWindows.shared.close(d.id); store.deleteDoc(d.id) }
         }
     }
@@ -922,6 +931,99 @@ struct LibraryView: View {
 }
 
 extension Notification.Name { static let showNotebook = Notification.Name("showNotebook") }
+
+struct DocProgressAndMediaMenuItems: View {
+    @ObservedObject var store: Store
+    let doc: Doc
+    let onJump: (Int) -> Void
+
+    var body: some View {
+        Menu(L("多端阅读进度与恢复")) {
+            if let conflict = doc.pendingConflict {
+                Section(L("检测到多设备阅读进度冲突")) {
+                    Button(LF("保留本机 (p.%d)", conflict.localPage + 1)) {
+                        store.resolveProgressConflict(doc.id, useRemote: false)
+                        onJump(conflict.localPage)
+                    }
+                    Button(LF("采用 %@ (p.%d)", conflict.remoteDeviceName, conflict.remotePage + 1)) {
+                        store.resolveProgressConflict(doc.id, useRemote: true)
+                        onJump(conflict.remotePage)
+                    }
+                }
+            }
+            Section(L("各设备阅读与讲解进度")) {
+                if doc.deviceProgressHistory.isEmpty {
+                    Text(L("暂无多设备同步记录"))
+                } else {
+                    ForEach(doc.deviceProgressHistory) { snap in
+                        Button {
+                            store.restoreProgressSnapshot(doc.id, page: snap.readPage, narrationPage: snap.narrationPage, narrationSeg: snap.narrationSeg)
+                            onJump(snap.readPage)
+                        } label: {
+                            let narrText = snap.narrationPage.map { " · " + LF("讲解 p.%d · 第 %d 段", $0 + 1, (snap.narrationSeg ?? 0) + 1) } ?? ""
+                            Text("\(snap.deviceName): p.\(snap.readPage + 1)\(narrText)")
+                        }
+                    }
+                }
+            }
+            let daily = doc.dailyReadingLog.sorted { $0.key > $1.key }
+            if !daily.isEmpty {
+                Section(L("每日阅读足迹")) {
+                    ForEach(daily.prefix(14), id: \.key) { day, p in
+                        Button("\(day) — " + LF("阅读至 p.%d", p + 1)) {
+                            store.restoreProgressSnapshot(doc.id, page: p)
+                            onJump(p)
+                        }
+                    }
+                }
+            }
+        }
+        Menu(L("重置音频与视频空间")) {
+            Button(L("清理语音与视频缓存")) {
+                _ = StorageManager.resetDocMedia(doc.id, title: doc.title, includeScripts: false, includeBilingual: false)
+            }
+            Button(L("清理语音、视频与双语缓存")) {
+                _ = StorageManager.resetDocMedia(doc.id, title: doc.title, includeScripts: false, includeBilingual: true)
+            }
+            Divider()
+            Button(L("完全重置（含 AI 讲解稿）"), role: .destructive) {
+                _ = StorageManager.resetDocMedia(doc.id, title: doc.title, includeScripts: true, includeBilingual: false)
+            }
+        }
+    }
+}
+
+struct MacProgressConflictBanner: View {
+    let conflict: ProgressConflict
+    let onKeepLocal: () -> Void
+    let onAcceptRemote: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.arrow.triangle.2.circlepath")
+                .foregroundStyle(.orange)
+            Text(L("检测到多设备阅读进度冲突") + " · " + LF("本机 (%@) 位于第 %d 页，另一设备 (%@) 位于第 %d 页", conflict.localDeviceName, conflict.localPage + 1, conflict.remoteDeviceName, conflict.remotePage + 1))
+                .font(.system(size: 11.5, weight: .medium))
+                .lineLimit(1)
+            Spacer()
+            Button(LF("保留本机 (p.%d)", conflict.localPage + 1), action: onKeepLocal)
+                .controlSize(.small)
+            Button(LF("采用 %@ (p.%d)", conflict.remoteDeviceName, conflict.remotePage + 1), action: onAcceptRemote)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color.orange.opacity(0.14))
+        .overlay(Rectangle().fill(Color.orange.opacity(0.35)).frame(height: 0.5), alignment: .bottom)
+    }
+}
 
 struct Thumb: View {
     let docId: UUID
@@ -958,6 +1060,17 @@ struct ReaderPane: View {
     var body: some View {
         VStack(spacing: 0) {
             if let id = rc.docId, let s = store.session(id) {
+                if let conflict = store.doc(id)?.pendingConflict {
+                    MacProgressConflictBanner(
+                        conflict: conflict,
+                        onKeepLocal: { store.resolveProgressConflict(id, useRemote: false) },
+                        onAcceptRemote: {
+                            store.resolveProgressConflict(id, useRemote: true)
+                            rc.goToPage(conflict.remotePage)
+                        },
+                        onDismiss: { store.dismissProgressConflict(id) }
+                    )
+                }
                 ZStack(alignment: .topLeading) {
                     PDFReaderView(store: store, rc: rc)
                     ReaderOverlay(store: store, rc: rc)

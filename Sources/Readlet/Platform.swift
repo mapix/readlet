@@ -196,6 +196,7 @@ final class ReaderController: NSObject, ObservableObject {
     private var focusView: UIView?
     private var loading = false
     private var pendingInitialPage: Int? = nil
+    private var initialLoadedPage: Int? = nil
     private var programmaticScrollUntil = Date.distantPast
 
     override init() {
@@ -243,6 +244,7 @@ final class ReaderController: NSObject, ObservableObject {
         let clamped = min(max(0, savedPage), max(0, pageCount - 1))
         currentPageIndex = clamped
         pendingInitialPage = clamped
+        initialLoadedPage = clamped
         if view.document !== targetDoc {
             view.document = targetDoc
             view.autoScales = true
@@ -261,6 +263,19 @@ final class ReaderController: NSObject, ObservableObject {
             self.applyPendingInitialPageIfNeeded()
             self.loading = false
         }
+    }
+
+    func applyRemoteSyncedPage(_ i: Int) {
+        guard let doc = view.document, doc.pageCount > 0 else { return }
+        let clamped = min(max(0, i), doc.pageCount - 1)
+        guard let pg = doc.safePage(clamped) else { return }
+        let wasLoading = loading
+        loading = true
+        pendingInitialPage = clamped
+        initialLoadedPage = clamped
+        currentPageIndex = clamped
+        view.go(to: pg)
+        loading = wasLoading
     }
 
     func applyPendingInitialPageIfNeeded() {
@@ -311,6 +326,15 @@ final class ReaderController: NSObject, ObservableObject {
             currentPageIndex = idx
         }
         if let id = docId {
+            if let initP = initialLoadedPage {
+                if idx == initP {
+                    if variant == .bilingual, let ses = Store.shared.session(id) {
+                        ses.prioritize(idx)
+                    }
+                    return
+                }
+                initialLoadedPage = nil
+            }
             UserDefaults.standard.set(idx, forKey: "page-" + id.uuidString)
             Store.shared.updateReadingProgress(docId: id, page: idx, pageCount: max(1, doc.pageCount))
             if variant == .bilingual, let ses = Store.shared.session(id) {
@@ -373,6 +397,7 @@ final class ReaderController: NSObject, ObservableObject {
         guard let doc = view.document else { return }
         let clamped = min(max(0, i), max(0, doc.pageCount - 1))
         pendingInitialPage = nil
+        initialLoadedPage = nil
         if let pg = doc.safePage(clamped) {
             let wasLoading = loading
             loading = true

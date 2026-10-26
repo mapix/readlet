@@ -24,6 +24,67 @@ enum DocStatusTag: String, CaseIterable, Codable, Identifiable, Equatable {
     }
 }
 
+enum DeviceIdentity {
+    static let currentDeviceId: String = {
+        let key = "readlet.device.id"
+        if let existing = UserDefaults.standard.string(forKey: key), !existing.isEmpty {
+            return existing
+        }
+        let fresh = UUID().uuidString
+        UserDefaults.standard.set(fresh, forKey: key)
+        return fresh
+    }()
+
+    static var currentDeviceName: String {
+        #if os(macOS)
+        if let name = Host.current().localizedName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+            return name
+        }
+        return "Mac"
+        #elseif os(iOS)
+        let name = UIDevice.current.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? "iPhone" : name
+        #endif
+    }
+
+    static func todayDateKey(_ date: Date = Date()) -> String {
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .gregorian)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: date)
+    }
+}
+
+struct DeviceProgressSnapshot: Codable, Hashable, Identifiable {
+    var deviceId: String
+    var deviceName: String
+    var readPage: Int
+    var narrationPage: Int? = nil
+    var narrationSeg: Int? = nil
+    var updatedAt: Date
+
+    var id: String { deviceId.isEmpty ? deviceName : deviceId }
+}
+
+struct ProgressConflict: Codable, Hashable {
+    var localDeviceId: String
+    var localDeviceName: String
+    var localPage: Int
+    var localNarrationPage: Int? = nil
+    var localNarrationSeg: Int? = nil
+    var localUpdatedAt: Date
+
+    var remoteDeviceId: String
+    var remoteDeviceName: String
+    var remotePage: Int
+    var remoteNarrationPage: Int? = nil
+    var remoteNarrationSeg: Int? = nil
+    var remoteUpdatedAt: Date
+
+    var detectedAt: Date = Date()
+}
+
 struct Doc: Codable, Identifiable, Hashable {
     var id = UUID()
     var title: String
@@ -36,14 +97,45 @@ struct Doc: Codable, Identifiable, Hashable {
     var pageCount: Int? = nil
     /// 0-indexed current / furthest page read
     var readPage: Int? = nil
+    /// when `readPage` was last updated by user page navigation
+    var readUpdatedAt: Date? = nil
+    /// device name & id that recorded `readPage`
+    var lastReadDevice: String? = nil
+    var lastReadDeviceId: String? = nil
     /// 0-indexed page and segment for AI Narration progress (synced across Mac & iOS)
     var narrationPage: Int? = nil
     var narrationSeg: Int? = nil
     var narrationUpdatedAt: Date? = nil
+    var lastNarrationDevice: String? = nil
+    /// per-device progress snapshots (up to 6 devices) for cross-device tracking & recovery
+    var deviceProgressHistory: [DeviceProgressSnapshot] = []
+    /// daily reading log: `"yyyy-MM-dd"` -> 0-indexed page reached that day
+    var dailyReadingLog: [String: Int] = [:]
+    /// non-nil when two devices reported conflicting reading/narration progress
+    var pendingConflict: ProgressConflict? = nil
     /// last modified timestamp for conflict-free iCloud sync
     var updatedAt: Date? = nil
 
-    init(id: UUID = UUID(), title: String, added: Date = Date(), source: String? = nil, tags: [String] = [], pageCount: Int? = nil, readPage: Int? = nil, narrationPage: Int? = nil, narrationSeg: Int? = nil, narrationUpdatedAt: Date? = nil, updatedAt: Date? = Date()) {
+    init(
+        id: UUID = UUID(),
+        title: String,
+        added: Date = Date(),
+        source: String? = nil,
+        tags: [String] = [],
+        pageCount: Int? = nil,
+        readPage: Int? = nil,
+        readUpdatedAt: Date? = nil,
+        lastReadDevice: String? = nil,
+        lastReadDeviceId: String? = nil,
+        narrationPage: Int? = nil,
+        narrationSeg: Int? = nil,
+        narrationUpdatedAt: Date? = nil,
+        lastNarrationDevice: String? = nil,
+        deviceProgressHistory: [DeviceProgressSnapshot] = [],
+        dailyReadingLog: [String: Int] = [:],
+        pendingConflict: ProgressConflict? = nil,
+        updatedAt: Date? = Date()
+    ) {
         self.id = id
         self.title = title
         self.added = added
@@ -51,13 +143,26 @@ struct Doc: Codable, Identifiable, Hashable {
         self.tags = tags
         self.pageCount = pageCount
         self.readPage = readPage
+        self.readUpdatedAt = readUpdatedAt
+        self.lastReadDevice = lastReadDevice
+        self.lastReadDeviceId = lastReadDeviceId
         self.narrationPage = narrationPage
         self.narrationSeg = narrationSeg
         self.narrationUpdatedAt = narrationUpdatedAt
+        self.lastNarrationDevice = lastNarrationDevice
+        self.deviceProgressHistory = deviceProgressHistory
+        self.dailyReadingLog = dailyReadingLog
+        self.pendingConflict = pendingConflict
         self.updatedAt = updatedAt
     }
 
-    enum CodingKeys: String, CodingKey { case id, title, added, source, tags, pageCount, readPage, narrationPage, narrationSeg, narrationUpdatedAt, updatedAt }
+    enum CodingKeys: String, CodingKey {
+        case id, title, added, source, tags, pageCount
+        case readPage, readUpdatedAt, lastReadDevice, lastReadDeviceId
+        case narrationPage, narrationSeg, narrationUpdatedAt, lastNarrationDevice
+        case deviceProgressHistory, dailyReadingLog, pendingConflict, updatedAt
+    }
+
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id)
@@ -67,9 +172,16 @@ struct Doc: Codable, Identifiable, Hashable {
         tags = try c.decodeIfPresent([String].self, forKey: .tags) ?? []
         pageCount = try c.decodeIfPresent(Int.self, forKey: .pageCount)
         readPage = try c.decodeIfPresent(Int.self, forKey: .readPage)
+        readUpdatedAt = try c.decodeIfPresent(Date.self, forKey: .readUpdatedAt)
+        lastReadDevice = try c.decodeIfPresent(String.self, forKey: .lastReadDevice)
+        lastReadDeviceId = try c.decodeIfPresent(String.self, forKey: .lastReadDeviceId)
         narrationPage = try c.decodeIfPresent(Int.self, forKey: .narrationPage)
         narrationSeg = try c.decodeIfPresent(Int.self, forKey: .narrationSeg)
         narrationUpdatedAt = try c.decodeIfPresent(Date.self, forKey: .narrationUpdatedAt)
+        lastNarrationDevice = try c.decodeIfPresent(String.self, forKey: .lastNarrationDevice)
+        deviceProgressHistory = try c.decodeIfPresent([DeviceProgressSnapshot].self, forKey: .deviceProgressHistory) ?? []
+        dailyReadingLog = try c.decodeIfPresent([String: Int].self, forKey: .dailyReadingLog) ?? [:]
+        pendingConflict = try c.decodeIfPresent(ProgressConflict.self, forKey: .pendingConflict)
         updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt)
     }
 
@@ -103,6 +215,37 @@ struct Doc: Codable, Identifiable, Hashable {
 
     var progressPercent: Int {
         Int((progressFraction * 100.0).rounded())
+    }
+
+    mutating func recordDeviceSnapshot(
+        deviceId: String = DeviceIdentity.currentDeviceId,
+        deviceName: String = DeviceIdentity.currentDeviceName,
+        page: Int,
+        narrationPage: Int? = nil,
+        narrationSeg: Int? = nil,
+        at date: Date = Date()
+    ) {
+        let snap = DeviceProgressSnapshot(
+            deviceId: deviceId,
+            deviceName: deviceName,
+            readPage: max(0, page),
+            narrationPage: narrationPage ?? self.narrationPage,
+            narrationSeg: narrationSeg ?? self.narrationSeg,
+            updatedAt: date
+        )
+        deviceProgressHistory.removeAll { $0.deviceId == deviceId || $0.deviceName == deviceName }
+        deviceProgressHistory.insert(snap, at: 0)
+        if deviceProgressHistory.count > 6 {
+            deviceProgressHistory = Array(deviceProgressHistory.prefix(6))
+        }
+        let dayKey = DeviceIdentity.todayDateKey(date)
+        let prevDayMax = dailyReadingLog[dayKey] ?? 0
+        dailyReadingLog[dayKey] = max(prevDayMax, max(0, page))
+        if dailyReadingLog.count > 45 {
+            let sortedKeys = dailyReadingLog.keys.sorted(by: >).prefix(45)
+            let keep = Set(sortedKeys)
+            dailyReadingLog = dailyReadingLog.filter { keep.contains($0.key) }
+        }
     }
 }
 
@@ -223,6 +366,13 @@ enum Paths {
         return u
     }
     static func pdf(_ id: UUID) -> URL { docDir(id).appendingPathComponent("original.pdf") }
+    static func hasLocalPDF(_ id: UUID) -> Bool {
+        let u = pdf(id)
+        guard FileManager.default.fileExists(atPath: u.path),
+              let sz = (try? u.resourceValues(forKeys: [.fileSizeKey]))?.fileSize,
+              sz > 100 else { return false }
+        return true
+    }
     static func cardImage(_ id: UUID) -> URL {
         let u = base.appendingPathComponent("images", isDirectory: true)
         try? FileManager.default.createDirectory(at: u, withIntermediateDirectories: true)
@@ -309,9 +459,12 @@ final class Store: ObservableObject {
                 lib.docs[i].pageCount = pdf.pageCount
                 changed = true
             }
-            if lib.docs[i].readPage == nil, UserDefaults.standard.object(forKey: "page-" + docId.uuidString) != nil {
-                lib.docs[i].readPage = UserDefaults.standard.integer(forKey: "page-" + docId.uuidString)
-                changed = true
+            if UserDefaults.standard.object(forKey: "page-" + docId.uuidString) != nil {
+                let udPage = UserDefaults.standard.integer(forKey: "page-" + docId.uuidString)
+                if lib.docs[i].readPage == nil || (udPage > (lib.docs[i].readPage ?? 0) && lib.docs[i].readUpdatedAt == nil) {
+                    lib.docs[i].readPage = udPage
+                    changed = true
+                }
             }
             if lib.docs[i].narrationPage == nil,
                let prog = Narrator.savedDiskProgress(docId),
@@ -319,6 +472,21 @@ final class Store: ObservableObject {
                 lib.docs[i].narrationPage = prog.page
                 lib.docs[i].narrationSeg = prog.seg
                 lib.docs[i].narrationUpdatedAt = prog.date
+                changed = true
+            }
+            if lib.docs[i].deviceProgressHistory.isEmpty,
+               let rp = lib.docs[i].readPage,
+               (rp > 0 || (lib.docs[i].narrationPage ?? 0) > 0 || (lib.docs[i].narrationSeg ?? 0) > 0) {
+                let ts = lib.docs[i].readUpdatedAt ?? lib.docs[i].updatedAt ?? Date()
+                if lib.docs[i].readUpdatedAt == nil { lib.docs[i].readUpdatedAt = ts }
+                if lib.docs[i].lastReadDevice == nil { lib.docs[i].lastReadDevice = DeviceIdentity.currentDeviceName }
+                if lib.docs[i].lastReadDeviceId == nil { lib.docs[i].lastReadDeviceId = DeviceIdentity.currentDeviceId }
+                lib.docs[i].recordDeviceSnapshot(
+                    page: rp,
+                    narrationPage: lib.docs[i].narrationPage,
+                    narrationSeg: lib.docs[i].narrationSeg,
+                    at: ts
+                )
                 changed = true
             }
         }
@@ -349,8 +517,25 @@ final class Store: ObservableObject {
 
     /// Applies a merged library from `CloudSync` without triggering a redundant re-upload loop.
     func applyCloudMergedLibrary(_ merged: Library) {
+        let oldPages = Dictionary(uniqueKeysWithValues: lib.docs.map { ($0.id, $0.readPage) })
         let goneCards = Set(lib.cards.map(\.id)).subtracting(merged.cards.map(\.id))
         lib = merged
+        for d in lib.docs {
+            if let rp = d.readPage {
+                UserDefaults.standard.set(rp, forKey: "page-" + d.id.uuidString)
+                if oldPages[d.id] != rp, d.pendingConflict == nil {
+                    #if os(macOS)
+                    if let entry = DocWindows.shared.entries[d.id], entry.reader.currentPageIndex != rp {
+                        entry.reader.applyRemoteSyncedPage(rp)
+                    }
+                    #elseif os(iOS)
+                    if ReaderController.shared.docId == d.id, ReaderController.shared.currentPageIndex != rp {
+                        ReaderController.shared.applyRemoteSyncedPage(rp)
+                    }
+                    #endif
+                }
+            }
+        }
         if currentNotebookId == nil || !lib.notebooks.contains(where: { $0.id == currentNotebookId }) {
             currentNotebookId = lib.notebooks.first?.id
         }
@@ -522,6 +707,7 @@ final class Store: ObservableObject {
     func updateReadingProgress(docId: UUID, page: Int, pageCount: Int) {
         guard let i = lib.docs.firstIndex(where: { $0.id == docId }) else { return }
         let clampedPage = min(max(0, page), max(0, pageCount - 1))
+        let now = Date()
         var changed = false
         if lib.docs[i].pageCount != pageCount {
             lib.docs[i].pageCount = pageCount
@@ -529,7 +715,18 @@ final class Store: ObservableObject {
         }
         if lib.docs[i].readPage != clampedPage {
             lib.docs[i].readPage = clampedPage
+            lib.docs[i].readUpdatedAt = now
+            lib.docs[i].lastReadDevice = DeviceIdentity.currentDeviceName
+            lib.docs[i].lastReadDeviceId = DeviceIdentity.currentDeviceId
+            lib.docs[i].recordDeviceSnapshot(page: clampedPage, at: now)
+            UserDefaults.standard.set(clampedPage, forKey: "page-" + docId.uuidString)
             changed = true
+        } else {
+            let dayKey = DeviceIdentity.todayDateKey(now)
+            if (lib.docs[i].dailyReadingLog[dayKey] ?? -1) < clampedPage {
+                lib.docs[i].dailyReadingLog[dayKey] = clampedPage
+                changed = true
+            }
         }
         // Automatically transition TODO -> DOING when the user reads past page 1
         if lib.docs[i].statusTag == .todo && clampedPage > 0 {
@@ -539,7 +736,7 @@ final class Store: ObservableObject {
             changed = true
         }
         if changed {
-            lib.docs[i].updatedAt = Date()
+            lib.docs[i].updatedAt = now
             save()
         }
     }
@@ -552,6 +749,13 @@ final class Store: ObservableObject {
         lib.docs[i].narrationPage = clampedPage
         lib.docs[i].narrationSeg = clampedSeg
         lib.docs[i].narrationUpdatedAt = date
+        lib.docs[i].lastNarrationDevice = DeviceIdentity.currentDeviceName
+        lib.docs[i].recordDeviceSnapshot(
+            page: lib.docs[i].readPage ?? clampedPage,
+            narrationPage: clampedPage,
+            narrationSeg: clampedSeg,
+            at: date
+        )
         lib.docs[i].updatedAt = date
         save()
     }
@@ -563,6 +767,61 @@ final class Store: ObservableObject {
         lib.docs[i].narrationUpdatedAt = Date()
         lib.docs[i].updatedAt = Date()
         save()
+    }
+
+    /// Resolves a cross-device progress conflict by choosing either the local or remote snapshot, or restores any device snapshot.
+    func resolveProgressConflict(_ docId: UUID, useRemote: Bool) {
+        guard let i = lib.docs.firstIndex(where: { $0.id == docId }),
+              let conflict = lib.docs[i].pendingConflict else { return }
+        let chosenPage = useRemote ? conflict.remotePage : conflict.localPage
+        let chosenNarrPage = useRemote ? conflict.remoteNarrationPage : conflict.localNarrationPage
+        let chosenNarrSeg = useRemote ? conflict.remoteNarrationSeg : conflict.localNarrationSeg
+        restoreProgressSnapshot(docId, page: chosenPage, narrationPage: chosenNarrPage, narrationSeg: chosenNarrSeg)
+    }
+
+    func dismissProgressConflict(_ docId: UUID) {
+        guard let i = lib.docs.firstIndex(where: { $0.id == docId }) else { return }
+        lib.docs[i].pendingConflict = nil
+        lib.docs[i].readUpdatedAt = Date()
+        lib.docs[i].updatedAt = Date()
+        saveNow()
+    }
+
+    func restoreProgressSnapshot(_ docId: UUID, page: Int, narrationPage: Int? = nil, narrationSeg: Int? = nil) {
+        guard let i = lib.docs.firstIndex(where: { $0.id == docId }) else { return }
+        let total = max(1, lib.docs[i].pageCount ?? 9999)
+        let clampedPage = min(max(0, page), total - 1)
+        let now = Date()
+        lib.docs[i].readPage = clampedPage
+        lib.docs[i].readUpdatedAt = now
+        lib.docs[i].lastReadDevice = DeviceIdentity.currentDeviceName
+        lib.docs[i].lastReadDeviceId = DeviceIdentity.currentDeviceId
+        if let np = narrationPage {
+            lib.docs[i].narrationPage = max(0, np)
+            lib.docs[i].narrationSeg = max(0, narrationSeg ?? 0)
+            lib.docs[i].narrationUpdatedAt = now
+            lib.docs[i].lastNarrationDevice = DeviceIdentity.currentDeviceName
+        }
+        lib.docs[i].pendingConflict = nil
+        lib.docs[i].recordDeviceSnapshot(
+            page: clampedPage,
+            narrationPage: lib.docs[i].narrationPage,
+            narrationSeg: lib.docs[i].narrationSeg,
+            at: now
+        )
+        lib.docs[i].updatedAt = now
+        UserDefaults.standard.set(clampedPage, forKey: "page-" + docId.uuidString)
+        saveNow()
+
+        #if os(macOS)
+        if let entry = DocWindows.shared.entries[docId] {
+            entry.reader.goToPage(clampedPage)
+        }
+        #elseif os(iOS)
+        if ReaderController.shared.docId == docId {
+            ReaderController.shared.goToPage(clampedPage)
+        }
+        #endif
     }
 
     func addDocToNotebook(_ docId: UUID, notebook: UUID? = nil) {

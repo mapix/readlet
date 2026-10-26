@@ -70,6 +70,7 @@ final class CloudSync: ObservableObject {
     @Published var syncedDocsCount: Int = 0
     @Published var syncedCardsCount: Int = 0
     @Published var cloudLocationDescription: String = ""
+    @Published var downloadingDocs: Set<UUID> = []
 
     private var syncTask: Task<Void, Never>?
     private var debounceWork: DispatchWorkItem?
@@ -79,6 +80,51 @@ final class CloudSync: ObservableObject {
     private var started = false
 
     private init() {}
+
+    /// Ensures a document's `original.pdf` is downloaded and valid on local disk, triggering iCloud download if needed.
+    func ensurePDFDownloaded(_ docId: UUID) async -> Bool {
+        let localPDF = Paths.pdf(docId)
+        if Paths.hasLocalPDF(docId), PDFDocument(url: localPDF) != nil {
+            Store.shared.sessions[docId] = nil
+            return Store.shared.session(docId) != nil
+        }
+        downloadingDocs.insert(docId)
+        defer { downloadingDocs.remove(docId) }
+
+        syncNow(silent: false)
+
+        let cloudDirs = Self.resolveCloudDirectories()
+        let fm = FileManager.default
+        for attempt in 0..<24 {
+            for dir in cloudDirs {
+                let cloudDocDir = dir.appendingPathComponent("docs/\(docId.uuidString)", isDirectory: true)
+                let cloudPDF = cloudDocDir.appendingPathComponent("original.pdf")
+                let cloudPlaceholder = cloudDocDir.appendingPathComponent(".original.pdf.icloud")
+                if fm.fileExists(atPath: cloudPlaceholder.path) {
+                    try? fm.startDownloadingUbiquitousItem(at: cloudPlaceholder)
+                }
+                if fm.fileExists(atPath: cloudPDF.path) {
+                    try? fm.startDownloadingUbiquitousItem(at: cloudPDF)
+                }
+                Self.syncFileBidirectional(local: localPDF, cloud: cloudPDF)
+                Self.syncFileBidirectional(
+                    local: Paths.docDir(docId).appendingPathComponent("thumb.png"),
+                    cloud: cloudDocDir.appendingPathComponent("thumb.png")
+                )
+                let lNarr = Paths.docDir(docId).appendingPathComponent("narration", isDirectory: true)
+                let cNarr = cloudDocDir.appendingPathComponent("narration", isDirectory: true)
+                Self.syncDirectoryFilesBidirectional(localDir: lNarr, cloudDir: cNarr, extensions: ["json"])
+            }
+            if Paths.hasLocalPDF(docId), PDFDocument(url: localPDF) != nil {
+                Store.shared.sessions[docId] = nil
+                return Store.shared.session(docId) != nil
+            }
+            if attempt < 23 {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+            }
+        }
+        return Paths.hasLocalPDF(docId) && PDFDocument(url: localPDF) != nil
+    }
 
     nonisolated private static func writeDataIfChanged(_ data: Data, to url: URL) {
         if let existing = try? Data(contentsOf: url), existing == data {
@@ -132,6 +178,15 @@ final class CloudSync: ObservableObject {
 
         // 4. macOS & iOS Simulator direct iCloud Drive (`~/Library/Mobile Documents`)
         var candidateHomes: [String] = [NSHomeDirectory()]
+        #if os(macOS)
+        let comps = NSHomeDirectory().split(separator: "/")
+        if comps.count >= 2, comps[0] == "Users" {
+            let realHome = "/Users/\(comps[1])"
+            if !candidateHomes.contains(realHome) {
+                candidateHomes.insert(realHome, at: 0)
+            }
+        }
+        #endif
         #if targetEnvironment(simulator)
         var hostUserHome: String? = nil
         if let hostHome = ProcessInfo.processInfo.environment["SIMULATOR_HOST_HOME"], !hostHome.isEmpty {
@@ -151,19 +206,28 @@ final class CloudSync: ObservableObject {
         for home in candidateHomes {
             let mobileDocs = URL(fileURLWithPath: home, isDirectory: true)
                 .appendingPathComponent("Library/Mobile Documents", isDirectory: true)
-            guard fm.fileExists(atPath: mobileDocs.path) else { continue }
+            if fm.fileExists(atPath: mobileDocs.path) {
+                // App-specific iCloud container folder in Mobile Documents
+                let appContainer = mobileDocs
+                    .appendingPathComponent("iCloud~io~novarock~readlet/Documents", isDirectory: true)
+                addDir(appContainer)
 
-            // App-specific iCloud container folder in Mobile Documents
-            let appContainer = mobileDocs
-                .appendingPathComponent("iCloud~io~novarock~readlet/Documents", isDirectory: true)
-            addDir(appContainer)
-
-            // Visible `Readlet` folder inside iCloud Drive (`com~apple~CloudDocs/Readlet`)
-            // so files are also accessible via iCloud Drive / Files.app on iPhone & iPad!
-            let cloudDocsRoot = mobileDocs.appendingPathComponent("com~apple~CloudDocs", isDirectory: true)
-            if fm.fileExists(atPath: cloudDocsRoot.path) {
-                addDir(cloudDocsRoot.appendingPathComponent("Readlet", isDirectory: true))
+                // Visible `Readlet` folder inside iCloud Drive (`com~apple~CloudDocs/Readlet`)
+                // so files are also accessible via iCloud Drive / Files.app on iPhone & iPad!
+                let cloudDocsRoot = mobileDocs.appendingPathComponent("com~apple~CloudDocs", isDirectory: true)
+                if fm.fileExists(atPath: cloudDocsRoot.path) {
+                    addDir(cloudDocsRoot.appendingPathComponent("Readlet", isDirectory: true))
+                }
             }
+            #if os(macOS)
+            // Bridge non-sandboxed Application Support and MAS Container Application Support on the same Mac if accessible
+            let nonSandboxedSupport = URL(fileURLWithPath: home, isDirectory: true)
+                .appendingPathComponent("Library/Application Support/Readlet", isDirectory: true)
+            if nonSandboxedSupport.standardizedFileURL.path != Paths.base.standardizedFileURL.path,
+               fm.fileExists(atPath: nonSandboxedSupport.path) {
+                addDir(nonSandboxedSupport)
+            }
+            #endif
         }
 
         #if targetEnvironment(simulator)
@@ -283,7 +347,8 @@ final class CloudSync: ObservableObject {
 
     // MARK: - Two-Way Conflict-Free Library Merge
 
-    /// Merges `local` and `remote` libraries deterministically without losing documents, progress, tags, cards, or mind-map nodes.
+    /// Merges `local` and `remote` libraries deterministically without losing documents, progress, tags, cards, or mind-map nodes,
+    /// while detecting cross-device reading progress conflicts and merging per-device snapshots + daily reading logs.
     nonisolated static func mergeLibraries(
         local: Library,
         remote: Library,
@@ -319,15 +384,172 @@ final class CloudSync: ObservableObject {
                 }
                 mergedDoc.tags = mergedTags
                 mergedDoc.pageCount = l.pageCount ?? r.pageCount
-                // For reading progress: if one has a strictly newer update timestamp and a non-nil readPage, prefer it;
-                // otherwise take the furthest page reached across devices.
-                if rTime > lTime, let rp = r.readPage {
-                    mergedDoc.readPage = max(rp, l.readPage ?? 0)
-                } else if lTime > rTime, let lp = l.readPage {
-                    mergedDoc.readPage = max(lp, r.readPage ?? 0)
-                } else if l.readPage != nil || r.readPage != nil {
-                    mergedDoc.readPage = max(l.readPage ?? 0, r.readPage ?? 0)
+
+                // Merge dailyReadingLog (keep highest page reached on each date)
+                var combinedDaily = l.dailyReadingLog
+                for (day, pg) in r.dailyReadingLog {
+                    combinedDaily[day] = max(combinedDaily[day] ?? 0, pg)
                 }
+                if combinedDaily.count > 45 {
+                    let keep = Set(combinedDaily.keys.sorted(by: >).prefix(45))
+                    combinedDaily = combinedDaily.filter { keep.contains($0.key) }
+                }
+                mergedDoc.dailyReadingLog = combinedDaily
+
+                // Merge deviceProgressHistory across both sides (plus current local/remote endpoints)
+                var snapshotsByDevice: [String: DeviceProgressSnapshot] = [:]
+                for snap in (l.deviceProgressHistory + r.deviceProgressHistory) {
+                    let key = snap.deviceId.isEmpty ? snap.deviceName : snap.deviceId
+                    if let existing = snapshotsByDevice[key] {
+                        if snap.updatedAt > existing.updatedAt || (snap.updatedAt == existing.updatedAt && snap.readPage > existing.readPage) {
+                            snapshotsByDevice[key] = snap
+                        }
+                    } else {
+                        snapshotsByDevice[key] = snap
+                    }
+                }
+                if let lp = l.readPage, let lDev = l.lastReadDevice, !lDev.isEmpty {
+                    let key = (l.lastReadDeviceId?.isEmpty == false) ? l.lastReadDeviceId! : lDev
+                    let snap = DeviceProgressSnapshot(
+                        deviceId: l.lastReadDeviceId ?? lDev,
+                        deviceName: lDev,
+                        readPage: lp,
+                        narrationPage: l.narrationPage,
+                        narrationSeg: l.narrationSeg,
+                        updatedAt: l.readUpdatedAt ?? lTime
+                    )
+                    if let existing = snapshotsByDevice[key] {
+                        if snap.updatedAt >= existing.updatedAt { snapshotsByDevice[key] = snap }
+                    } else {
+                        snapshotsByDevice[key] = snap
+                    }
+                }
+                if let rp = r.readPage, let rDev = r.lastReadDevice, !rDev.isEmpty {
+                    let key = (r.lastReadDeviceId?.isEmpty == false) ? r.lastReadDeviceId! : rDev
+                    let snap = DeviceProgressSnapshot(
+                        deviceId: r.lastReadDeviceId ?? rDev,
+                        deviceName: rDev,
+                        readPage: rp,
+                        narrationPage: r.narrationPage,
+                        narrationSeg: r.narrationSeg,
+                        updatedAt: r.readUpdatedAt ?? rTime
+                    )
+                    if let existing = snapshotsByDevice[key] {
+                        if snap.updatedAt >= existing.updatedAt { snapshotsByDevice[key] = snap }
+                    } else {
+                        snapshotsByDevice[key] = snap
+                    }
+                }
+                mergedDoc.deviceProgressHistory = Array(
+                    snapshotsByDevice.values.sorted { $0.updatedAt > $1.updatedAt }.prefix(6)
+                )
+
+                // Reading progress merge & conflict detection
+                let lReadTime = l.readUpdatedAt ?? lTime
+                let rReadTime = r.readUpdatedAt ?? rTime
+                if let lp = l.readPage, let rp = r.readPage {
+                    if lp == rp {
+                        mergedDoc.readPage = lp
+                        if rReadTime > lReadTime {
+                            mergedDoc.readUpdatedAt = r.readUpdatedAt ?? l.readUpdatedAt
+                            mergedDoc.lastReadDevice = r.lastReadDevice ?? l.lastReadDevice
+                            mergedDoc.lastReadDeviceId = r.lastReadDeviceId ?? l.lastReadDeviceId
+                        } else {
+                            mergedDoc.readUpdatedAt = l.readUpdatedAt ?? r.readUpdatedAt
+                            mergedDoc.lastReadDevice = l.lastReadDevice ?? r.lastReadDevice
+                            mergedDoc.lastReadDeviceId = l.lastReadDeviceId ?? r.lastReadDeviceId
+                        }
+                        mergedDoc.pendingConflict = nil
+                    } else {
+                        let lDevId = l.lastReadDeviceId ?? ""
+                        let rDevId = r.lastReadDeviceId ?? ""
+                        let lDevName = l.lastReadDevice ?? "Mac"
+                        let rDevName = r.lastReadDevice ?? "iPhone"
+                        let differentDevices: Bool = {
+                            if !lDevId.isEmpty && !rDevId.isEmpty { return lDevId != rDevId }
+                            if l.lastReadDevice != nil && r.lastReadDevice != nil { return lDevName != rDevName }
+                            return true
+                        }()
+                        let pageDelta = abs(lp - rp)
+                        let newerWentBackwards = (rReadTime > lReadTime && rp < lp) || (lReadTime > rReadTime && lp < rp)
+                        let bothHaveExplicitReadDates = l.readUpdatedAt != nil && r.readUpdatedAt != nil
+                        let concurrentDivergence = bothHaveExplicitReadDates
+                            && abs(rReadTime.timeIntervalSince(lReadTime)) < 6 * 3600
+                            && pageDelta >= 3
+
+                        // Detect conflict if two devices diverge and either the newer timestamp is on an earlier page
+                        // or both devices explicitly updated reading positions recently to different pages
+                        if differentDevices && pageDelta >= 2 && (newerWentBackwards || concurrentDivergence) {
+                            mergedDoc.pendingConflict = ProgressConflict(
+                                localDeviceId: lDevId.isEmpty ? "local" : lDevId,
+                                localDeviceName: lDevName,
+                                localPage: lp,
+                                localNarrationPage: l.narrationPage,
+                                localNarrationSeg: l.narrationSeg,
+                                localUpdatedAt: lReadTime,
+                                remoteDeviceId: rDevId.isEmpty ? "remote" : rDevId,
+                                remoteDeviceName: rDevName,
+                                remotePage: rp,
+                                remoteNarrationPage: r.narrationPage,
+                                remoteNarrationSeg: r.narrationSeg,
+                                remoteUpdatedAt: rReadTime,
+                                detectedAt: max(lReadTime, rReadTime)
+                            )
+                        } else {
+                            mergedDoc.pendingConflict = l.pendingConflict ?? r.pendingConflict
+                        }
+
+                        // Tentative winning page:
+                        // If one side is at page 0 (just opened) and the other is > 0, never let page 0 clobber non-zero progress;
+                        // otherwise if explicit readUpdatedAt timestamps exist, prefer the newer one; otherwise prefer max(lp, rp).
+                        if lp == 0 && rp > 0 {
+                            mergedDoc.readPage = rp
+                            mergedDoc.readUpdatedAt = r.readUpdatedAt ?? l.readUpdatedAt
+                            mergedDoc.lastReadDevice = r.lastReadDevice ?? l.lastReadDevice
+                            mergedDoc.lastReadDeviceId = r.lastReadDeviceId ?? l.lastReadDeviceId
+                        } else if rp == 0 && lp > 0 {
+                            mergedDoc.readPage = lp
+                            mergedDoc.readUpdatedAt = l.readUpdatedAt ?? r.readUpdatedAt
+                            mergedDoc.lastReadDevice = l.lastReadDevice ?? r.lastReadDevice
+                            mergedDoc.lastReadDeviceId = l.lastReadDeviceId ?? r.lastReadDeviceId
+                        } else if bothHaveExplicitReadDates && !newerWentBackwards {
+                            if rReadTime >= lReadTime {
+                                mergedDoc.readPage = rp
+                                mergedDoc.readUpdatedAt = r.readUpdatedAt
+                                mergedDoc.lastReadDevice = r.lastReadDevice ?? l.lastReadDevice
+                                mergedDoc.lastReadDeviceId = r.lastReadDeviceId ?? l.lastReadDeviceId
+                            } else {
+                                mergedDoc.readPage = lp
+                                mergedDoc.readUpdatedAt = l.readUpdatedAt
+                                mergedDoc.lastReadDevice = l.lastReadDevice ?? r.lastReadDevice
+                                mergedDoc.lastReadDeviceId = l.lastReadDeviceId ?? r.lastReadDeviceId
+                            }
+                        } else {
+                            if rp >= lp {
+                                mergedDoc.readPage = rp
+                                mergedDoc.readUpdatedAt = r.readUpdatedAt ?? l.readUpdatedAt
+                                mergedDoc.lastReadDevice = r.lastReadDevice ?? l.lastReadDevice
+                                mergedDoc.lastReadDeviceId = r.lastReadDeviceId ?? l.lastReadDeviceId
+                            } else {
+                                mergedDoc.readPage = lp
+                                mergedDoc.readUpdatedAt = l.readUpdatedAt ?? r.readUpdatedAt
+                                mergedDoc.lastReadDevice = l.lastReadDevice ?? r.lastReadDevice
+                                mergedDoc.lastReadDeviceId = l.lastReadDeviceId ?? r.lastReadDeviceId
+                            }
+                        }
+                    }
+                } else if let rp = r.readPage {
+                    mergedDoc.readPage = rp
+                    mergedDoc.readUpdatedAt = r.readUpdatedAt
+                    mergedDoc.lastReadDevice = r.lastReadDevice
+                    mergedDoc.lastReadDeviceId = r.lastReadDeviceId
+                } else if let lp = l.readPage {
+                    mergedDoc.readPage = lp
+                    mergedDoc.readUpdatedAt = l.readUpdatedAt
+                    mergedDoc.lastReadDevice = l.lastReadDevice
+                    mergedDoc.lastReadDeviceId = l.lastReadDeviceId
+                }
+
                 // Merge AI Narration progress (ignoring trivial page 0 seg 0 when non-zero progress exists)
                 let lHasNarr = (l.narrationPage ?? 0) > 0 || (l.narrationSeg ?? 0) > 0
                 let rHasNarr = (r.narrationPage ?? 0) > 0 || (r.narrationSeg ?? 0) > 0
@@ -338,19 +560,23 @@ final class CloudSync: ObservableObject {
                         mergedDoc.narrationPage = r.narrationPage
                         mergedDoc.narrationSeg = r.narrationSeg
                         mergedDoc.narrationUpdatedAt = r.narrationUpdatedAt
+                        mergedDoc.lastNarrationDevice = r.lastNarrationDevice ?? l.lastNarrationDevice
                     } else {
                         mergedDoc.narrationPage = l.narrationPage
                         mergedDoc.narrationSeg = l.narrationSeg
                         mergedDoc.narrationUpdatedAt = l.narrationUpdatedAt
+                        mergedDoc.lastNarrationDevice = l.lastNarrationDevice ?? r.lastNarrationDevice
                     }
                 } else if rHasNarr {
                     mergedDoc.narrationPage = r.narrationPage
                     mergedDoc.narrationSeg = r.narrationSeg
                     mergedDoc.narrationUpdatedAt = r.narrationUpdatedAt
+                    mergedDoc.lastNarrationDevice = r.lastNarrationDevice
                 } else if lHasNarr {
                     mergedDoc.narrationPage = l.narrationPage
                     mergedDoc.narrationSeg = l.narrationSeg
                     mergedDoc.narrationUpdatedAt = l.narrationUpdatedAt
+                    mergedDoc.lastNarrationDevice = l.lastNarrationDevice
                 }
                 docsById[r.id] = mergedDoc
             } else {
@@ -534,7 +760,7 @@ final class CloudSync: ObservableObject {
             let result = await Task.detached(priority: .utility) { () -> (Library, Bool, CloudSettingsPayload?, Data?, Data?, Data?, String?) in
                 let fm = FileManager.default
 
-                // 1. Trigger downloads for any unmaterialized `.icloud` placeholder files
+                // 1. Trigger downloads for any unmaterialized `.icloud` placeholder files (PDFs, JSONs, images)
                 for dir in cloudDirs {
                     Self.downloadUbiquitousPlaceholders(in: dir)
                 }
@@ -625,7 +851,8 @@ final class CloudSync: ObservableObject {
                     }
                 }
 
-                // 5. Sync document files (`original.pdf`, `thumb.png`, `narration/`, `bi2-*/`, `flashcards.json`) for all valid docs
+                // 5. Sync document files (`original.pdf`, `thumb.png`, `narration/*.json`, `trans.json`, `chat.json`, `flashcards.json`).
+                // Audio files (`*.m4a`, `*.wav`) and rendered bilingual caches (`bi2-*`) are kept strictly local!
                 for docIdx in workingLib.docs.indices {
                     let doc = workingLib.docs[docIdx]
                     let localDocDir = localBase.appendingPathComponent("docs/\(doc.id.uuidString)", isDirectory: true)
@@ -649,21 +876,26 @@ final class CloudSync: ObservableObject {
                         let cloudDocDir = dir.appendingPathComponent("docs/\(doc.id.uuidString)", isDirectory: true)
                         try? fm.createDirectory(at: cloudDocDir, withIntermediateDirectories: true)
 
-                        // Sync original.pdf, thumb.png, flashcards.json (newer file wins)
-                        for fileName in ["original.pdf", "thumb.png", "flashcards.json"] {
+                        // Sync PDF + thumbnail + lightweight JSON files (never audio or video!)
+                        for fileName in ["original.pdf", "thumb.png", "flashcards.json", "trans.json", "chat.json"] {
                             let lFile = localDocDir.appendingPathComponent(fileName)
                             let cFile = cloudDocDir.appendingPathComponent(fileName)
                             Self.syncFileBidirectional(local: lFile, cloud: cFile)
                         }
 
-                        // Sync narration scripts & progress, plus audio clips for the active narration window
+                        // Sync narration scripts & progress (`*.json` only), and migrate any legacy cloud audio/bilingual caches to local before purging from iCloud!
                         let cNarr = cloudDocDir.appendingPathComponent("narration", isDirectory: true)
                         Self.syncDirectoryFilesBidirectional(localDir: lNarr, cloudDir: cNarr, extensions: ["json"])
-                        let activePage = workingLib.docs[docIdx].narrationPage ?? workingLib.docs[docIdx].readPage ?? 0
-                        Self.syncActiveNarrationClips(localDir: lNarr, cloudDir: cNarr, aroundPage: activePage)
+                        if dir.standardizedFileURL.path.contains("Mobile Documents") || dir.standardizedFileURL.path.contains("iCloud") {
+                            Self.purgeAudioClipsFromCloud(cloudDir: cNarr, migrateToLocalDir: lNarr)
+                            Self.migrateAndPurgeBilingualFromCloud(cloudDocDir: cloudDocDir, localDocDir: localDocDir)
+                        }
+                    }
 
-                        // Sync bilingual page cache (`bi2-*`)
-                        Self.syncMatchingSubdirectories(localParent: localDocDir, cloudParent: cloudDocDir, prefix: "bi2-")
+                    if workingLib.docs[docIdx].pageCount == nil,
+                       let pdf = PDFDocument(url: localDocDir.appendingPathComponent("original.pdf")) {
+                        workingLib.docs[docIdx].pageCount = pdf.pageCount
+                        anyLocalChange = true
                     }
 
                     if let syncedProgData = try? Data(contentsOf: lProgURL),
@@ -810,23 +1042,107 @@ final class CloudSync: ObservableObject {
         for case let fileURL as URL in enumerator {
             let name = fileURL.lastPathComponent
             if name.hasPrefix(".") && name.hasSuffix(".icloud") {
-                try? fm.startDownloadingUbiquitousItem(at: fileURL)
+                // Never download audio clips from iCloud; delete audio placeholders instead
+                if name.hasSuffix(".m4a.icloud") || name.hasSuffix(".wav.icloud") {
+                    try? fm.removeItem(at: fileURL)
+                } else {
+                    try? fm.startDownloadingUbiquitousItem(at: fileURL)
+                }
             }
+        }
+    }
+
+    /// Migrates any materialized `.m4a` / `.wav` audio files from an iCloud `narration/` directory into `migrateToLocalDir`
+    /// (if not already present locally), and then removes them from iCloud so audio stays strictly local.
+    nonisolated static func purgeAudioClipsFromCloud(cloudDir: URL, migrateToLocalDir: URL? = nil) {
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(at: cloudDir, includingPropertiesForKeys: nil) else { return }
+        var createdLocal = false
+        for f in files {
+            let name = f.lastPathComponent
+            let ext = f.pathExtension.lowercased()
+            if ext == "m4a" || ext == "wav" {
+                if let localDir = migrateToLocalDir, isValidSyncFile(f) {
+                    let localFile = localDir.appendingPathComponent(name)
+                    if !isValidSyncFile(localFile) {
+                        if !createdLocal {
+                            try? fm.createDirectory(at: localDir, withIntermediateDirectories: true)
+                            createdLocal = true
+                        }
+                        atomicCopy(from: f, to: localFile)
+                    }
+                }
+                try? fm.removeItem(at: f)
+            } else if name.hasSuffix(".m4a.icloud") || name.hasSuffix(".wav.icloud") {
+                try? fm.removeItem(at: f)
+            }
+        }
+    }
+
+    /// Migrates any legacy `bi2-*` rendered bilingual PDF page caches from iCloud to local storage on upgrade, then removes them from iCloud.
+    nonisolated static func migrateAndPurgeBilingualFromCloud(cloudDocDir: URL, localDocDir: URL) {
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(at: cloudDocDir, includingPropertiesForKeys: nil) else { return }
+        for item in items where item.lastPathComponent.hasPrefix("bi2-") {
+            let localTarget = localDocDir.appendingPathComponent(item.lastPathComponent, isDirectory: true)
+            if !fm.fileExists(atPath: localTarget.path) {
+                try? fm.createDirectory(at: localDocDir, withIntermediateDirectories: true)
+                try? fm.moveItem(at: item, to: localTarget)
+            } else {
+                if let pages = try? fm.contentsOfDirectory(at: item, includingPropertiesForKeys: nil) {
+                    for p in pages where p.pathExtension.lowercased() == "pdf" && isValidSyncFile(p) {
+                        let lp = localTarget.appendingPathComponent(p.lastPathComponent)
+                        if !isValidSyncFile(lp) {
+                            atomicCopy(from: p, to: lp)
+                        }
+                    }
+                }
+                try? fm.removeItem(at: item)
+            }
+        }
+    }
+
+    nonisolated private static func isValidSyncFile(_ url: URL) -> Bool {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path),
+              let sz = (try? fm.attributesOfItem(atPath: url.path)[.size] as? Int),
+              sz > 0 else { return false }
+        if url.pathExtension.lowercased() == "pdf" {
+            return PDFDocument(url: url) != nil
+        }
+        return true
+    }
+
+    nonisolated private static func atomicCopy(from src: URL, to dst: URL) {
+        let fm = FileManager.default
+        let parent = dst.deletingLastPathComponent()
+        try? fm.createDirectory(at: parent, withIntermediateDirectories: true)
+        let tmp = parent.appendingPathComponent(".\(dst.lastPathComponent).tmp-\(UUID().uuidString.prefix(8))")
+        defer { try? fm.removeItem(at: tmp) }
+        guard (try? fm.copyItem(at: src, to: tmp)) != nil else { return }
+        if fm.fileExists(atPath: dst.path) {
+            _ = try? fm.replaceItemAt(dst, withItemAt: tmp)
+        } else {
+            try? fm.moveItem(at: tmp, to: dst)
         }
     }
 
     nonisolated static func syncFileBidirectional(local: URL, cloud: URL) {
         let fm = FileManager.default
-        let lExists = fm.fileExists(atPath: local.path)
-        let cExists = fm.fileExists(atPath: cloud.path)
+        let cloudPlaceholder = cloud.deletingLastPathComponent().appendingPathComponent(".\(cloud.lastPathComponent).icloud")
+        if fm.fileExists(atPath: cloudPlaceholder.path) {
+            try? fm.startDownloadingUbiquitousItem(at: cloudPlaceholder)
+        }
 
-        if lExists && !cExists {
-            try? fm.createDirectory(at: cloud.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try? fm.copyItem(at: local, to: cloud)
-        } else if !lExists && cExists {
-            try? fm.createDirectory(at: local.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try? fm.copyItem(at: cloud, to: local)
-        } else if lExists && cExists {
+        let lValid = isValidSyncFile(local)
+        let cValid = isValidSyncFile(cloud)
+
+        if lValid && !cValid {
+            // Do not overwrite an unmaterialized cloud placeholder unless local is a valid file ready to upload
+            atomicCopy(from: local, to: cloud)
+        } else if !lValid && cValid {
+            atomicCopy(from: cloud, to: local)
+        } else if lValid && cValid {
             let lAttr = try? fm.attributesOfItem(atPath: local.path)
             let cAttr = try? fm.attributesOfItem(atPath: cloud.path)
             let lDate = (lAttr?[.modificationDate] as? Date) ?? .distantPast
@@ -834,12 +1150,10 @@ final class CloudSync: ObservableObject {
             let lSize = (lAttr?[.size] as? Int) ?? 0
             let cSize = (cAttr?[.size] as? Int) ?? 0
             guard lSize != cSize || abs(lDate.timeIntervalSince(cDate)) > 2.0 else { return }
-            if lDate > cDate && lSize > 0 {
-                try? fm.removeItem(at: cloud)
-                try? fm.copyItem(at: local, to: cloud)
-            } else if cDate > lDate && cSize > 0 {
-                try? fm.removeItem(at: local)
-                try? fm.copyItem(at: cloud, to: local)
+            if lDate > cDate {
+                atomicCopy(from: local, to: cloud)
+            } else if cDate > lDate {
+                atomicCopy(from: cloud, to: local)
             }
         }
     }
@@ -850,9 +1164,14 @@ final class CloudSync: ObservableObject {
         let cFiles = (try? fm.contentsOfDirectory(at: cloudDir, includingPropertiesForKeys: nil)) ?? []
         var allNames = Set<String>()
         for u in lFiles + cFiles {
+            let name = u.lastPathComponent
+            if name.hasPrefix(".") && name.hasSuffix(".icloud") {
+                try? fm.startDownloadingUbiquitousItem(at: u)
+                continue
+            }
             let ext = u.pathExtension.lowercased()
             if extensions.isEmpty || extensions.contains(ext) {
-                allNames.insert(u.lastPathComponent)
+                allNames.insert(name)
             }
         }
         guard !allNames.isEmpty else { return }
@@ -862,48 +1181,6 @@ final class CloudSync: ObservableObject {
             syncFileBidirectional(
                 local: localDir.appendingPathComponent(name),
                 cloud: cloudDir.appendingPathComponent(name)
-            )
-        }
-    }
-
-    nonisolated static func syncActiveNarrationClips(localDir: URL, cloudDir: URL, aroundPage page: Int) {
-        let fm = FileManager.default
-        let pages = Set([0, max(0, page), max(0, page + 1)])
-        let prefixes = pages.map { "p\($0)-s" }
-        let lFiles = (try? fm.contentsOfDirectory(at: localDir, includingPropertiesForKeys: nil)) ?? []
-        let cFiles = (try? fm.contentsOfDirectory(at: cloudDir, includingPropertiesForKeys: nil)) ?? []
-        var clipNames = Set<String>()
-        for u in lFiles + cFiles {
-            let name = u.lastPathComponent
-            let ext = u.pathExtension.lowercased()
-            guard ext == "m4a" || ext == "wav" else { continue }
-            if prefixes.contains(where: { name.hasPrefix($0) }) {
-                clipNames.insert(name)
-            }
-        }
-        guard !clipNames.isEmpty else { return }
-        try? fm.createDirectory(at: localDir, withIntermediateDirectories: true)
-        try? fm.createDirectory(at: cloudDir, withIntermediateDirectories: true)
-        for name in clipNames {
-            syncFileBidirectional(
-                local: localDir.appendingPathComponent(name),
-                cloud: cloudDir.appendingPathComponent(name)
-            )
-        }
-    }
-
-    nonisolated static func syncMatchingSubdirectories(localParent: URL, cloudParent: URL, prefix: String) {
-        let fm = FileManager.default
-        let lSubs = ((try? fm.contentsOfDirectory(at: localParent, includingPropertiesForKeys: nil)) ?? [])
-            .filter { $0.lastPathComponent.hasPrefix(prefix) }
-        let cSubs = ((try? fm.contentsOfDirectory(at: cloudParent, includingPropertiesForKeys: nil)) ?? [])
-            .filter { $0.lastPathComponent.hasPrefix(prefix) }
-        let names = Set((lSubs + cSubs).map(\.lastPathComponent))
-        for name in names {
-            syncDirectoryFilesBidirectional(
-                localDir: localParent.appendingPathComponent(name, isDirectory: true),
-                cloudDir: cloudParent.appendingPathComponent(name, isDirectory: true),
-                extensions: ["pdf", "json"]
             )
         }
     }
@@ -1007,6 +1284,19 @@ final class CloudSync: ObservableObject {
     }
 
     #if os(macOS)
+    nonisolated private static func runDeviceCtl(_ args: [String]) -> (status: Int32, output: String) {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        proc.arguments = ["devicectl"] + args
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = Pipe()
+        guard (try? proc.run()) != nil else { return (-1, "") }
+        proc.waitUntilExit()
+        let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        return (proc.terminationStatus, out)
+    }
+
     nonisolated private static func syncWithConnectedIOSDevice(
         localBase: URL,
         cloudDirs: [URL],
@@ -1015,19 +1305,12 @@ final class CloudSync: ObservableObject {
         anyLocalChange: inout Bool
     ) {
         let fm = FileManager.default
-        let listProc = Process()
-        listProc.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-        listProc.arguments = ["devicectl", "list", "devices"]
-        let pipe = Pipe()
-        listProc.standardOutput = pipe
-        listProc.standardError = Pipe()
-        guard (try? listProc.run()) != nil else { return }
-        listProc.waitUntilExit()
-        guard listProc.terminationStatus == 0,
-              let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) else { return }
+        let (status, out) = runDeviceCtl(["list", "devices"])
+        guard status == 0, !out.isEmpty else { return }
 
         var deviceIds: [String] = []
-        for line in out.split(separator: "\n") where line.contains("connected") && (line.contains("iPhone") || line.contains("iPad")) {
+        for line in out.split(separator: "\n")
+        where (line.contains("connected") || line.contains("available")) && (line.contains("iPhone") || line.contains("iPad")) {
             let parts = line.split(whereSeparator: { $0.isWhitespace }).map(String.init)
             for p in parts where p.count == 36 && p.filter({ $0 == "-" }).count == 4 {
                 deviceIds.append(p)
@@ -1037,21 +1320,14 @@ final class CloudSync: ObservableObject {
 
         let tmpPull = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("readlet-ios-pull-\(devId).json")
         try? fm.removeItem(at: tmpPull)
-        let pullProc = Process()
-        pullProc.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-        pullProc.arguments = [
-            "devicectl", "device", "copy", "from",
+        _ = runDeviceCtl([
+            "device", "copy", "from",
             "--device", devId,
             "--domain-type", "appDataContainer",
             "--domain-identifier", "io.novarock.readlet",
             "--source", "Library/Application Support/Readlet/library.json",
             "--destination", tmpPull.path
-        ]
-        pullProc.standardOutput = Pipe()
-        pullProc.standardError = Pipe()
-        if (try? pullProc.run()) != nil {
-            pullProc.waitUntilExit()
-        }
+        ])
 
         var deviceHadLib = false
         var remoteNeedsUpdate = true
@@ -1066,9 +1342,9 @@ final class CloudSync: ObservableObject {
         try? fm.removeItem(at: tmpPull)
 
         if let encoded = try? JSONEncoder().encode(workingLib) {
-            try? encoded.write(to: localBase.appendingPathComponent("library.json"), options: .atomic)
+            writeDataIfChanged(encoded, to: localBase.appendingPathComponent("library.json"))
             for dir in cloudDirs {
-                try? encoded.write(to: dir.appendingPathComponent("library.json"), options: .atomic)
+                writeDataIfChanged(encoded, to: dir.appendingPathComponent("library.json"))
             }
         }
 
@@ -1076,21 +1352,69 @@ final class CloudSync: ObservableObject {
             for fn in ["library.json", "cloud-settings.json", "deleted-items.json"] {
                 let src = localBase.appendingPathComponent(fn)
                 guard fm.fileExists(atPath: src.path) else { continue }
-                let pushProc = Process()
-                pushProc.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-                pushProc.arguments = [
-                    "devicectl", "device", "copy", "to",
+                _ = runDeviceCtl([
+                    "device", "copy", "to",
                     "--device", devId,
                     "--domain-type", "appDataContainer",
                     "--domain-identifier", "io.novarock.readlet",
                     "--source", src.path,
                     "--destination", "Library/Application Support/Readlet/\(fn)"
-                ]
-                pushProc.standardOutput = Pipe()
-                pushProc.standardError = Pipe()
-                if (try? pushProc.run()) != nil {
-                    pushProc.waitUntilExit()
+                ])
+            }
+        }
+
+        // Also ensure PDFs, thumbnails, and narration scripts (never audio!) are synced to the connected iPhone
+        let (_, remoteDocsOut) = runDeviceCtl([
+            "device", "info", "files",
+            "--device", devId,
+            "--domain-type", "appDataContainer",
+            "--domain-identifier", "io.novarock.readlet",
+            "--subdirectory", "Library/Application Support/Readlet/docs"
+        ])
+        for doc in workingLib.docs {
+            let docIdStr = doc.id.uuidString
+            let localDocDir = localBase.appendingPathComponent("docs/\(docIdStr)", isDirectory: true)
+            let localPDF = localDocDir.appendingPathComponent("original.pdf")
+            guard isValidSyncFile(localPDF) else { continue }
+
+            // Check if the device already has `original.pdf` for this doc
+            let (_, docFilesOut) = runDeviceCtl([
+                "device", "info", "files",
+                "--device", devId,
+                "--domain-type", "appDataContainer",
+                "--domain-identifier", "io.novarock.readlet",
+                "--subdirectory", "Library/Application Support/Readlet/docs/\(docIdStr)"
+            ])
+            let hasRemotePDF = remoteDocsOut.contains(docIdStr) && docFilesOut.contains("original.pdf")
+            if !hasRemotePDF {
+                // Push clean doc directory (PDF + thumb + narration scripts only, no audio/bi2 caches)
+                let stageDir = URL(fileURLWithPath: NSTemporaryDirectory())
+                    .appendingPathComponent("readlet-stage-\(docIdStr)", isDirectory: true)
+                try? fm.removeItem(at: stageDir)
+                try? fm.createDirectory(at: stageDir, withIntermediateDirectories: true)
+                for fn in ["original.pdf", "thumb.png", "flashcards.json", "trans.json", "chat.json"] {
+                    let s = localDocDir.appendingPathComponent(fn)
+                    if fm.fileExists(atPath: s.path) {
+                        try? fm.copyItem(at: s, to: stageDir.appendingPathComponent(fn))
+                    }
                 }
+                let lNarr = localDocDir.appendingPathComponent("narration", isDirectory: true)
+                if let narrFiles = try? fm.contentsOfDirectory(at: lNarr, includingPropertiesForKeys: nil) {
+                    let sNarr = stageDir.appendingPathComponent("narration", isDirectory: true)
+                    try? fm.createDirectory(at: sNarr, withIntermediateDirectories: true)
+                    for nf in narrFiles where nf.pathExtension.lowercased() == "json" {
+                        try? fm.copyItem(at: nf, to: sNarr.appendingPathComponent(nf.lastPathComponent))
+                    }
+                }
+                _ = runDeviceCtl([
+                    "device", "copy", "to",
+                    "--device", devId,
+                    "--domain-type", "appDataContainer",
+                    "--domain-identifier", "io.novarock.readlet",
+                    "--source", stageDir.path,
+                    "--destination", "Library/Application Support/Readlet/docs/\(docIdStr)"
+                ])
+                try? fm.removeItem(at: stageDir)
             }
         }
     }

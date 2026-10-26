@@ -204,25 +204,49 @@ final class ReaderController: NSObject, ObservableObject {
         loadedKey = key
         // read the saved page BEFORE swapping the document: setting view.document fires PDFViewPageChanged
         // for page 0, and pageChanged() would overwrite the stored position with 0
-        let savedPage = UserDefaults.standard.integer(forKey: "page-" + session.doc.id.uuidString)
+        let savedPage = store.doc(session.doc.id)?.resolvedReadPage
+            ?? UserDefaults.standard.integer(forKey: "page-" + session.doc.id.uuidString)
         loading = true
         let d = session.document(variant)
         view.document = d
         let z = UserDefaults.standard.double(forKey: "zoom")
         if z > 0 { view.autoScales = false; view.scaleFactor = CGFloat(z) } else { view.autoScales = true }
-        if let kp = keepPage, let p = d.safePage(min(max(0, kp), d.pageCount - 1)) {
-            // switching original ↔ bilingual: land on the same page, top
-            view.go(to: p)
+        let targetPage: Int
+        if let kp = keepPage {
+            targetPage = min(max(0, kp), max(0, d.pageCount - 1))
         } else {
-            let i = savedPage
-            if let p = d.safePage(min(max(0, i), d.pageCount - 1)) { view.go(to: p) }
+            targetPage = min(max(0, savedPage), max(0, d.pageCount - 1))
+        }
+        initialLoadedPage = targetPage
+        currentPageIndex = targetPage
+        UserDefaults.standard.set(targetPage, forKey: "page-" + session.doc.id.uuidString)
+        if let p = d.safePage(targetPage) {
+            view.go(to: p)
         }
         loading = false
-        pageChanged()
         if variant == .bilingual { session.startBilingual(from: currentPageIndex) }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.pageChanged() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self, let d = self.view.document else { return }
+            if let initP = self.initialLoadedPage, let p = d.safePage(initP), self.view.currentPage != p {
+                self.loading = true
+                self.view.go(to: p)
+                self.loading = false
+            }
+        }
         observeScroll()
         view.backgroundColor = MN.paperNS
+    }
+
+    func applyRemoteSyncedPage(_ i: Int) {
+        guard let d = view.document, d.pageCount > 0 else { return }
+        let clamped = min(max(0, i), d.pageCount - 1)
+        guard let p = d.safePage(clamped) else { return }
+        let wasLoading = loading
+        loading = true
+        initialLoadedPage = clamped
+        currentPageIndex = clamped
+        view.go(to: p)
+        loading = wasLoading
     }
 
     func setVariant(_ v: Variant) {
@@ -247,7 +271,9 @@ final class ReaderController: NSObject, ObservableObject {
         loadedKey = session.doc.id.uuidString + variant.rawValue
         let z = UserDefaults.standard.double(forKey: "zoom")
         if z > 0 { view.autoScales = false; view.scaleFactor = CGFloat(z) } else { view.autoScales = true }
-        if let p = d.safePage(min(max(0, targetPage), max(0, d.pageCount - 1))) {
+        let clamped = min(max(0, targetPage), max(0, d.pageCount - 1))
+        initialLoadedPage = nil
+        if let p = d.safePage(clamped) {
             view.go(to: p)
         }
         loading = false
@@ -257,6 +283,7 @@ final class ReaderController: NSObject, ObservableObject {
     }
 
     private var loading = false
+    private var initialLoadedPage: Int? = nil
     private var programmaticScrollUntil = Date.distantPast
     @objc func pageChanged() {
         guard !loading, !restoring, Date() >= programmaticScrollUntil, let d = view.document, let p = view.currentPage else { return }
@@ -265,8 +292,16 @@ final class ReaderController: NSObject, ObservableObject {
             return
         }
         let i = d.index(for: p)
+        guard i != NSNotFound, i >= 0 else { return }
         if i != currentPageIndex { currentPageIndex = i }
         if let id = docId {
+            if let initP = initialLoadedPage {
+                if i == initP {
+                    if variant == .bilingual { store.sessions[id]?.prioritize(i) }
+                    return
+                }
+                initialLoadedPage = nil
+            }
             UserDefaults.standard.set(i, forKey: "page-" + id.uuidString)
             let total = store.sessions[id]?.pageCount ?? d.pageCount
             store.updateReadingProgress(docId: id, page: i, pageCount: total)
@@ -945,7 +980,20 @@ final class ReaderController: NSObject, ObservableObject {
 
     private func clip0Sane(_ b: CGRect) -> Bool { b.origin.isSane && b.width.isSane && b.height.isSane && b.height > 0 }
 
-    func goToPage(_ i: Int) { if let d = view.document, d.pageCount > 0, let p = d.safePage(min(max(0, i), d.pageCount - 1)) { view.go(to: p) } }
+    func goToPage(_ i: Int) {
+        guard let d = view.document, d.pageCount > 0 else { return }
+        let clamped = min(max(0, i), d.pageCount - 1)
+        initialLoadedPage = nil
+        if let p = d.safePage(clamped) {
+            view.go(to: p)
+            currentPageIndex = clamped
+            if let id = docId {
+                UserDefaults.standard.set(clamped, forKey: "page-" + id.uuidString)
+                let total = store.sessions[id]?.pageCount ?? d.pageCount
+                store.updateReadingProgress(docId: id, page: clamped, pageCount: total)
+            }
+        }
+    }
 
     func zoom(_ f: CGFloat) {
         let a = captureAnchor()

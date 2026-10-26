@@ -295,5 +295,99 @@ final class NewFeaturesTests: XCTestCase {
         XCTAssertEqual(mNb.root.children.count, 2)
         XCTAssertEqual(Set(mNb.docIds), Set([docId1, docId2]))
     }
+
+    func testCrossDeviceProgressConflictAndHistoryMerge() {
+        let docId = UUID()
+        let now = Date()
+
+        let localDoc = Doc(
+            id: docId,
+            title: "Distributed Systems Paper",
+            pageCount: 30,
+            readPage: 18,
+            readUpdatedAt: now.addingTimeInterval(-60),
+            lastReadDevice: "MacBook Pro",
+            lastReadDeviceId: "dev-mac",
+            deviceProgressHistory: [
+                DeviceProgressSnapshot(deviceId: "dev-mac", deviceName: "MacBook Pro", readPage: 18, narrationPage: 4, narrationSeg: 2, updatedAt: now.addingTimeInterval(-60))
+            ],
+            dailyReadingLog: ["2026-10-25": 10, "2026-10-26": 18],
+            updatedAt: now.addingTimeInterval(-60)
+        )
+
+        let remoteDoc = Doc(
+            id: docId,
+            title: "Distributed Systems Paper",
+            pageCount: 30,
+            readPage: 6,
+            readUpdatedAt: now,
+            lastReadDevice: "iPhone 14",
+            lastReadDeviceId: "dev-iphone",
+            deviceProgressHistory: [
+                DeviceProgressSnapshot(deviceId: "dev-iphone", deviceName: "iPhone 14", readPage: 6, narrationPage: 6, narrationSeg: 1, updatedAt: now)
+            ],
+            dailyReadingLog: ["2026-10-24": 3, "2026-10-26": 6],
+            updatedAt: now
+        )
+
+        let (merged, localChanged, _) = CloudSync.mergeLibraries(
+            local: Library(docs: [localDoc]),
+            remote: Library(docs: [remoteDoc]),
+            deleted: []
+        )
+        XCTAssertTrue(localChanged)
+        let mDoc = merged.docs[0]
+        // Conflict detected because remote device is on a much earlier page (6 vs 18) despite newer timestamp:
+        // local higher page (18) is preserved until user chooses in conflict banner!
+        XCTAssertEqual(mDoc.readPage, 18)
+        XCTAssertNotNil(mDoc.pendingConflict)
+        XCTAssertEqual(mDoc.pendingConflict?.localPage, 18)
+        XCTAssertEqual(mDoc.pendingConflict?.remotePage, 6)
+        XCTAssertEqual(mDoc.deviceProgressHistory.count, 2)
+        XCTAssertEqual(mDoc.dailyReadingLog["2026-10-26"], 18)
+        XCTAssertEqual(mDoc.dailyReadingLog["2026-10-24"], 3)
+    }
+
+    func testPerDocAudioVideoSpaceResetAndCloudAudioMigration() throws {
+        let fm = FileManager.default
+        let docId = UUID()
+        let narrDir = Paths.docDir(docId).appendingPathComponent("narration", isDirectory: true)
+        defer { try? fm.removeItem(at: Paths.docDir(docId)) }
+        try fm.createDirectory(at: narrDir, withIntermediateDirectories: true)
+
+        // Create local audio clip + narration script + video file
+        let audioClip = narrDir.appendingPathComponent("p0-s0.m4a")
+        let scriptFile = narrDir.appendingPathComponent("p0.json")
+        let docVideo = Paths.docDir(docId).appendingPathComponent("export.mp4")
+        try Data(repeating: 0xAA, count: 4096).write(to: audioClip)
+        try Data("{\"segments\":[]}".utf8).write(to: scriptFile)
+        try Data(repeating: 0xBB, count: 8192).write(to: docVideo)
+
+        let usageBefore = StorageManager.docMediaUsage(docId, title: "TestPaper")
+        XCTAssertEqual(usageBefore.audioCount, 1)
+        XCTAssertEqual(usageBefore.videoCount, 1)
+        XCTAssertEqual(usageBefore.scriptCount, 1)
+        XCTAssertGreaterThanOrEqual(usageBefore.audioBytes, 4096)
+        XCTAssertGreaterThanOrEqual(usageBefore.videoBytes, 8192)
+
+        // Reset audio & video only (keep scripts)
+        let freed = StorageManager.resetDocMedia(docId, title: "TestPaper", includeScripts: false, includeBilingual: false)
+        XCTAssertGreaterThanOrEqual(freed, 4096 + 8192)
+        XCTAssertFalse(fm.fileExists(atPath: audioClip.path))
+        XCTAssertFalse(fm.fileExists(atPath: docVideo.path))
+        XCTAssertTrue(fm.fileExists(atPath: scriptFile.path))
+
+        // Test upgrade migration: audio in cloudDir is migrated to localDir before being purged from cloudDir
+        let tmpCloudNarr = fm.temporaryDirectory.appendingPathComponent("cloud-narr-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: tmpCloudNarr) }
+        try fm.createDirectory(at: tmpCloudNarr, withIntermediateDirectories: true)
+        let cloudClip = tmpCloudNarr.appendingPathComponent("p1-s0.m4a")
+        try Data(repeating: 0xCC, count: 2048).write(to: cloudClip)
+
+        CloudSync.purgeAudioClipsFromCloud(cloudDir: tmpCloudNarr, migrateToLocalDir: narrDir)
+        XCTAssertFalse(fm.fileExists(atPath: cloudClip.path), "Cloud audio clip should be removed from iCloud")
+        XCTAssertTrue(fm.fileExists(atPath: narrDir.appendingPathComponent("p1-s0.m4a").path), "Cloud audio clip should be migrated to local storage on upgrade")
+    }
 }
+
 

@@ -361,6 +361,7 @@ struct SettingsView: View {
             Section(L("存储")) {
                 if let u = usage {
                     LabeledContent(L("讲解语音缓存"), value: StorageManager.format(u.audio))
+                    LabeledContent(L("导出讲解视频"), value: StorageManager.format(u.video))
                     LabeledContent(L("双语页面缓存"), value: StorageManager.format(u.bilingual))
                     LabeledContent(L("PDF 原文件"), value: StorageManager.format(u.pdfs))
                     LabeledContent(L("笔记、讲稿与翻译"), value: StorageManager.format(u.other))
@@ -388,8 +389,43 @@ struct SettingsView: View {
                     Button(L("在访达中显示数据目录")) { NSWorkspace.shared.activateFileViewerSelecting([Paths.base]) }
                 }
             }
+            Section(L("单篇文档音视频空间")) {
+                let docs = Store.shared.lib.docs
+                if docs.isEmpty {
+                    Text(L("当前没有占用的语音或视频缓存")).font(.caption).foregroundStyle(.secondary)
+                } else {
+                    ForEach(docs) { d in
+                        let du = StorageManager.docMediaUsage(d.id, title: d.title)
+                        if du.totalResettableBytes > 0 || du.bilingualBytes > 0 {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(d.title).font(.callout).lineLimit(1)
+                                    Text(LF("语音 %@ (%d 段) · 视频 %@ (%d 个) · 讲稿 %@", StorageManager.format(du.audioBytes), du.audioCount, StorageManager.format(du.videoBytes), du.videoCount, StorageManager.format(du.scriptBytes)))
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Menu(L("重置")) {
+                                    Button(L("清理语音与视频缓存")) {
+                                        run(L("正在清理…")) { _ = StorageManager.resetDocMedia(d.id, title: d.title, includeScripts: false, includeBilingual: false) }
+                                    }
+                                    Button(L("清理语音、视频与双语缓存")) {
+                                        run(L("正在清理…")) { _ = StorageManager.resetDocMedia(d.id, title: d.title, includeScripts: false, includeBilingual: true) }
+                                    }
+                                    Divider()
+                                    Button(L("完全重置（含 AI 讲解稿）"), role: .destructive) {
+                                        run(L("正在清理…")) { _ = StorageManager.resetDocMedia(d.id, title: d.title, includeScripts: true, includeBilingual: false) }
+                                    }
+                                }.fixedSize()
+                            }
+                        }
+                    }
+                }
+            }
             Section(L("iCloud 多端同步（Mac · iPhone · iPad）")) {
                 Toggle(L("自动通过 iCloud 同步文档、标签、阅读进度、卡片与配置"), isOn: $cloud.isEnabled)
+                Text(L("仅同步 PDF、讲解稿、摘录批注、笔记本与阅读进度；语音与视频文件仅保留在本地，不占用 iCloud 流量与空间。"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 HStack {
                     Image(systemName: cloud.state.isSyncing ? "arrow.triangle.2.circlepath.icloud.fill" : "checkmark.icloud.fill")
                         .foregroundStyle(cloud.isEnabled ? .blue : .secondary)

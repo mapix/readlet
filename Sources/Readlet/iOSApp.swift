@@ -241,6 +241,7 @@ struct iOSBookshelfView: View {
     @State private var renamingNotebookId: UUID?
     @State private var renameNotebookText = ""
     @State private var managingNotebookId: UUID?
+    @State private var progressHistoryDocId: UUID?
     @State private var searchText = ""
 
     private var activeNotebook: Notebook? {
@@ -300,6 +301,9 @@ struct iOSBookshelfView: View {
                                         tagTargetDocId = doc.id
                                         newTagText = ""
                                         showNewTagAlert = true
+                                    },
+                                    onOpenProgressHistory: {
+                                        progressHistoryDocId = doc.id
                                     }
                                 )
                             }
@@ -428,6 +432,19 @@ struct iOSBookshelfView: View {
                 if let nbId = managingNotebookId {
                     iOSNotebookDocsSheet(store: store, notebookId: nbId)
                         .preferredColorScheme(themeCenter.colorScheme)
+                }
+            }
+            .sheet(isPresented: Binding(
+                get: { progressHistoryDocId != nil },
+                set: { if !$0 { progressHistoryDocId = nil } }
+            )) {
+                if let docId = progressHistoryDocId {
+                    iOSDocProgressHistorySheet(store: store, docId: docId, onJumpToPage: { p in
+                        progressHistoryDocId = nil
+                        store.restoreProgressSnapshot(docId, page: p)
+                        onOpenDoc(docId)
+                    })
+                    .preferredColorScheme(themeCenter.colorScheme)
                 }
             }
             .alert(L("添加标签"), isPresented: $showNewTagAlert) {
@@ -881,6 +898,7 @@ struct iOSDocCardView: View {
     var activeNotebookId: UUID? = nil
     let onTap: () -> Void
     let onAddCustomTag: () -> Void
+    var onOpenProgressHistory: (() -> Void)? = nil
 
     private var isNarratingThisDoc: Bool {
         narrator.state != .idle && narrator.docId == doc.id
@@ -913,20 +931,51 @@ struct iOSDocCardView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 10))
                     .overlay(RoundedRectangle(cornerRadius: 10).stroke(isNarratingThisDoc ? MN.accent : Color.black.opacity(0.08), lineWidth: isNarratingThisDoc ? 1.6 : 0.6))
 
-                Button {
-                    store.cycleStatusTag(doc.id)
-                } label: {
-                    let st = doc.statusTag
-                    HStack(spacing: 3) {
-                        Image(systemName: st?.icon ?? "tag")
-                            .font(.system(size: 10, weight: .bold))
-                        Text(st?.rawValue ?? "TAG")
-                            .font(.system(size: 10, weight: .bold))
+                HStack(spacing: 4) {
+                    if doc.pendingConflict != nil {
+                        Button {
+                            onOpenProgressHistory?()
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "exclamationmark.arrow.triangle.2.circlepath")
+                                    .font(.system(size: 9, weight: .bold))
+                                Text(L("进度冲突"))
+                                    .font(.system(size: 9.5, weight: .bold))
+                            }
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3.5)
+                            .background(Capsule().fill(Color.orange))
+                            .foregroundStyle(.white)
+                        }
+                        .buttonStyle(.plain)
+                    } else if !Paths.hasLocalPDF(doc.id) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "icloud.and.arrow.down")
+                                .font(.system(size: 9, weight: .bold))
+                            Text(L("待下载"))
+                                .font(.system(size: 9.5, weight: .bold))
+                        }
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3.5)
+                        .background(Capsule().fill(MN.accent.opacity(0.88)))
+                        .foregroundStyle(.white)
                     }
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 4)
-                    .background(Capsule().fill(st != nil ? statusColor(st) : Color.black.opacity(0.55)))
-                    .foregroundStyle(.white)
+                    Spacer()
+                    Button {
+                        store.cycleStatusTag(doc.id)
+                    } label: {
+                        let st = doc.statusTag
+                        HStack(spacing: 3) {
+                            Image(systemName: st?.icon ?? "tag")
+                                .font(.system(size: 10, weight: .bold))
+                            Text(st?.rawValue ?? "TAG")
+                                .font(.system(size: 10, weight: .bold))
+                        }
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(st != nil ? statusColor(st) : Color.black.opacity(0.55)))
+                        .foregroundStyle(.white)
+                    }
                 }
                 .padding(8)
 
@@ -1003,6 +1052,32 @@ struct iOSDocCardView: View {
                 togglePodcastForDoc()
             } label: {
                 Label(isNarratingThisDoc ? (narrator.state == .playing ? L("暂停解读") : L("继续解读")) : L("AI 语音解读"), systemImage: isNarratingThisDoc ? "waveform" : "headphones")
+            }
+            if let onOpenProgressHistory {
+                Button {
+                    onOpenProgressHistory()
+                } label: {
+                    Label(L("多端阅读进度与恢复…"), systemImage: "clock.arrow.circlepath")
+                }
+            }
+            Menu {
+                Button {
+                    _ = StorageManager.resetDocMedia(doc.id, title: doc.title, includeScripts: false, includeBilingual: false)
+                } label: {
+                    Label(L("清理语音与视频缓存"), systemImage: "waveform.slash")
+                }
+                Button {
+                    _ = StorageManager.resetDocMedia(doc.id, title: doc.title, includeScripts: false, includeBilingual: true)
+                } label: {
+                    Label(L("清理语音、视频与双语缓存"), systemImage: "doc.badge.gearshape")
+                }
+                Button(role: .destructive) {
+                    _ = StorageManager.resetDocMedia(doc.id, title: doc.title, includeScripts: true, includeBilingual: false)
+                } label: {
+                    Label(L("完全重置（含 AI 讲解稿）"), systemImage: "trash.slash")
+                }
+            } label: {
+                Label(L("重置音频与视频空间"), systemImage: "externaldrive.badge.minus")
             }
             Divider()
             ForEach(DocStatusTag.allCases) { st in
@@ -1111,6 +1186,7 @@ struct iOSDocumentStudyView: View {
     @State private var showOutlineSheet = false
     @State private var showFlashcardsSheet = false
     @State private var showVoiceSettingsSheet = false
+    @State private var showProgressHistorySheet = false
     @State private var showPDFEditConfirmation: String?
 
     private var doc: Doc? { store.doc(docId) }
@@ -1121,9 +1197,32 @@ struct iOSDocumentStudyView: View {
             VStack(spacing: 0) {
                 topReaderControlBar
 
+                if let conflict = doc?.pendingConflict {
+                    iOSProgressConflictBanner(
+                        conflict: conflict,
+                        onKeepLocal: {
+                            store.resolveProgressConflict(docId, useRemote: false)
+                        },
+                        onAcceptRemote: {
+                            store.resolveProgressConflict(docId, useRemote: true)
+                            rc.goToPage(conflict.remotePage)
+                        },
+                        onOpenDetails: {
+                            showProgressHistorySheet = true
+                        },
+                        onDismiss: {
+                            store.dismissProgressConflict(docId)
+                        }
+                    )
+                }
+
                 ZStack(alignment: .bottom) {
                     Group {
-                        if viewMode == 0 {
+                        if session == nil && viewMode != 2 {
+                            iOSPDFDownloadRecoveryView(store: store, docId: docId) {
+                                rc.bind(docId: docId)
+                            }
+                        } else if viewMode == 0 {
                             iOSThemedPDFView(store: store, rc: rc, session: session, theme: themeCenter.theme)
                         } else if viewMode == 1 {
                             GeometryReader { geo in
@@ -1232,6 +1331,12 @@ struct iOSDocumentStudyView: View {
             .sheet(isPresented: $showVoiceSettingsSheet) {
                 iOSVoiceSettingsSheet()
                     .preferredColorScheme(themeCenter.colorScheme)
+            }
+            .sheet(isPresented: $showProgressHistorySheet) {
+                iOSDocProgressHistorySheet(store: store, docId: docId, onJumpToPage: { p in
+                    rc.goToPage(p)
+                })
+                .preferredColorScheme(themeCenter.colorScheme)
             }
         }
     }
@@ -1375,6 +1480,26 @@ struct iOSDocumentStudyView: View {
                     Section(L("学习工具")) {
                         Button { showOutlineSheet = true } label: { Label(L("目录与摘录卡片"), systemImage: "list.bullet.indent") }
                         Button { showFlashcardsSheet = true } label: { Label(L("AI 学习闪卡"), systemImage: "rectangle.on.rectangle.angled") }
+                        Button { showProgressHistorySheet = true } label: { Label(L("多端阅读进度与恢复…"), systemImage: "clock.arrow.circlepath") }
+                        Menu {
+                            Button {
+                                _ = StorageManager.resetDocMedia(docId, title: doc?.title, includeScripts: false, includeBilingual: false)
+                            } label: {
+                                Label(L("清理语音与视频缓存"), systemImage: "waveform.slash")
+                            }
+                            Button {
+                                _ = StorageManager.resetDocMedia(docId, title: doc?.title, includeScripts: false, includeBilingual: true)
+                            } label: {
+                                Label(L("清理语音、视频与双语缓存"), systemImage: "doc.badge.gearshape")
+                            }
+                            Button(role: .destructive) {
+                                _ = StorageManager.resetDocMedia(docId, title: doc?.title, includeScripts: true, includeBilingual: false)
+                            } label: {
+                                Label(L("完全重置（含 AI 讲解稿）"), systemImage: "trash.slash")
+                            }
+                        } label: {
+                            Label(L("重置音频与视频空间"), systemImage: "externaldrive.badge.minus")
+                        }
                     }
                     if let ses = session {
                         Section(L("AI 语音解读")) {
@@ -1504,9 +1629,25 @@ struct iOSDocumentStudyView: View {
             }
             .disabled(rc.currentPageIndex <= 0)
 
-            Text("p.\(rc.currentPageIndex + 1) / \(max(1, rc.pageCount))")
-                .font(.caption.monospacedDigit().weight(.semibold))
-                .foregroundStyle(MN.ink)
+            Button {
+                showProgressHistorySheet = true
+            } label: {
+                HStack(spacing: 4) {
+                    Text("p.\(rc.currentPageIndex + 1) / \(max(1, rc.pageCount))")
+                        .font(.caption.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(MN.ink)
+                    if doc?.pendingConflict != nil {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                    } else {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(MN.statusText)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
 
             Button {
                 rc.goToPage(rc.currentPageIndex + 1)
@@ -1543,6 +1684,310 @@ struct iOSDocumentStudyView: View {
         .overlay(alignment: .top) {
             Divider()
         }
+    }
+}
+
+struct iOSPDFDownloadRecoveryView: View {
+    @ObservedObject var store: Store
+    let docId: UUID
+    let onLoaded: () -> Void
+    @State private var isDownloading = true
+
+    var body: some View {
+        VStack(spacing: 14) {
+            if isDownloading {
+                ProgressView()
+                    .controlSize(.large)
+                    .tint(MN.accent)
+            } else {
+                Image(systemName: "icloud.and.arrow.down")
+                    .font(.system(size: 38))
+                    .foregroundStyle(MN.accent)
+            }
+            Text(L("正在从 iCloud 下载 PDF 文档…"))
+                .font(.headline)
+            Text(L("该文档的元数据已同步，正在拉取完整 PDF 文件，请稍候或点击重试。"))
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 28)
+            Button {
+                triggerDownload()
+            } label: {
+                Label(L("立即拉取 PDF"), systemImage: "arrow.clockwise.icloud")
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(MN.accent)
+            .disabled(isDownloading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(MN.paper)
+        .task(id: docId) {
+            await performDownload()
+        }
+    }
+
+    private func triggerDownload() {
+        Task { await performDownload() }
+    }
+
+    private func performDownload() async {
+        isDownloading = true
+        let ok = await CloudSync.shared.ensurePDFDownloaded(docId)
+        isDownloading = false
+        if ok {
+            store.objectWillChange.send()
+            onLoaded()
+        }
+    }
+}
+
+struct iOSProgressConflictBanner: View {
+    let conflict: ProgressConflict
+    let onKeepLocal: () -> Void
+    let onAcceptRemote: () -> Void
+    let onOpenDetails: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.arrow.triangle.2.circlepath")
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(L("检测到多设备阅读进度冲突"))
+                        .font(.caption.weight(.bold))
+                    Text(LF("本机 (%@) 位于第 %d 页，另一设备 (%@) 位于第 %d 页", conflict.localDeviceName, conflict.localPage + 1, conflict.remoteDeviceName, conflict.remotePage + 1))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 4)
+                Button(action: onDismiss) {
+                    Image(systemName: "xmark")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            HStack(spacing: 8) {
+                Button(action: onKeepLocal) {
+                    Text(LF("保留本机 (p.%d)", conflict.localPage + 1))
+                        .font(.caption2.weight(.semibold))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Capsule().fill(Color.primary.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+
+                Button(action: onAcceptRemote) {
+                    Text(LF("采用 %@ (p.%d)", conflict.remoteDeviceName, conflict.remotePage + 1))
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Capsule().fill(MN.accent))
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                Button(action: onOpenDetails) {
+                    Text(L("多端阅读进度与恢复"))
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(MN.accent)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(Color.orange.opacity(0.12))
+        .overlay(alignment: .bottom) { Divider() }
+    }
+}
+
+struct iOSDocProgressHistorySheet: View {
+    @ObservedObject var store: Store
+    let docId: UUID
+    let onJumpToPage: (Int) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var mediaUsage: StorageManager.DocMediaUsage?
+    @State private var resetToast: String = ""
+
+    private var doc: Doc? { store.doc(docId) }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if let conflict = doc?.pendingConflict {
+                    Section(L("检测到多设备阅读进度冲突")) {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text(LF("本机 (%@) 位于第 %d 页，另一设备 (%@) 位于第 %d 页", conflict.localDeviceName, conflict.localPage + 1, conflict.remoteDeviceName, conflict.remotePage + 1))
+                                .font(.footnote)
+                            HStack(spacing: 10) {
+                                Button {
+                                    store.resolveProgressConflict(docId, useRemote: false)
+                                    onJumpToPage(conflict.localPage)
+                                    dismiss()
+                                } label: {
+                                    Text(LF("保留本机 (p.%d)", conflict.localPage + 1))
+                                        .font(.caption.weight(.semibold))
+                                }
+                                .buttonStyle(.bordered)
+
+                                Button {
+                                    store.resolveProgressConflict(docId, useRemote: true)
+                                    onJumpToPage(conflict.remotePage)
+                                    dismiss()
+                                } label: {
+                                    Text(LF("采用 %@ (p.%d)", conflict.remoteDeviceName, conflict.remotePage + 1))
+                                        .font(.caption.weight(.semibold))
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(MN.accent)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+
+                Section(L("各设备阅读与讲解进度")) {
+                    let history = doc?.deviceProgressHistory ?? []
+                    if history.isEmpty {
+                        Text(L("暂无多设备同步记录"))
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(history) { snap in
+                            let isThisDevice = snap.deviceId == DeviceIdentity.currentDeviceId
+                            HStack(spacing: 10) {
+                                Image(systemName: snap.deviceName.lowercased().contains("mac") ? "laptopcomputer" : "iphone")
+                                    .foregroundStyle(isThisDevice ? MN.accent : .secondary)
+                                    .frame(width: 24)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    HStack(spacing: 6) {
+                                        Text(snap.deviceName)
+                                            .font(.subheadline.weight(.semibold))
+                                        if isThisDevice {
+                                            Text(L("本机"))
+                                                .font(.system(size: 10, weight: .bold))
+                                                .padding(.horizontal, 5)
+                                                .padding(.vertical, 1.5)
+                                                .background(Capsule().fill(MN.accent.opacity(0.14)))
+                                                .foregroundStyle(MN.accent)
+                                        }
+                                    }
+                                    HStack(spacing: 8) {
+                                        Text(LF("阅读至 p.%d", snap.readPage + 1))
+                                            .font(.caption.monospacedDigit())
+                                            .foregroundStyle(.primary)
+                                        if let np = snap.narrationPage, (np > 0 || (snap.narrationSeg ?? 0) > 0) {
+                                            Text("· " + LF("讲解 p.%d · 第 %d 段", np + 1, (snap.narrationSeg ?? 0) + 1))
+                                                .font(.caption.monospacedDigit())
+                                                .foregroundStyle(MN.accent)
+                                        }
+                                    }
+                                    Text(snap.updatedAt.formatted(date: .abbreviated, time: .shortened))
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Button {
+                                    store.restoreProgressSnapshot(docId, page: snap.readPage, narrationPage: snap.narrationPage, narrationSeg: snap.narrationSeg)
+                                    onJumpToPage(snap.readPage)
+                                    dismiss()
+                                } label: {
+                                    Text(L("恢复到此进度"))
+                                        .font(.caption.weight(.semibold))
+                                }
+                                .buttonStyle(.bordered)
+                                .tint(MN.accent)
+                            }
+                            .padding(.vertical, 2)
+                        }
+                    }
+                }
+
+                Section(L("每日阅读足迹")) {
+                    let log = (doc?.dailyReadingLog ?? [:]).sorted { $0.key > $1.key }
+                    if log.isEmpty {
+                        Text(L("暂无每日阅读记录"))
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(log, id: \.key) { day, pageIdx in
+                            HStack {
+                                Label(day, systemImage: "calendar")
+                                    .font(.subheadline.monospacedDigit())
+                                Spacer()
+                                Text(LF("阅读至 p.%d", pageIdx + 1))
+                                    .font(.caption.monospacedDigit().weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                Button {
+                                    store.restoreProgressSnapshot(docId, page: pageIdx)
+                                    onJumpToPage(pageIdx)
+                                    dismiss()
+                                } label: {
+                                    Text(LF("跳至 p.%d", pageIdx + 1))
+                                        .font(.caption2.weight(.semibold))
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                        }
+                    }
+                }
+
+                Section(L("本篇音频与视频占用")) {
+                    if let u = mediaUsage {
+                        Text(LF("语音 %@ (%d 段) · 视频 %@ (%d 个) · 讲稿 %@", StorageManager.format(u.audioBytes), u.audioCount, StorageManager.format(u.videoBytes), u.videoCount, StorageManager.format(u.scriptBytes)))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if !resetToast.isEmpty {
+                        Text(resetToast)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.green)
+                    }
+                    Button {
+                        let freed = StorageManager.resetDocMedia(docId, title: doc?.title, includeScripts: false, includeBilingual: false)
+                        resetToast = "✅ " + LF("已释放 %@ 空间", StorageManager.format(freed))
+                        refreshMediaUsage()
+                    } label: {
+                        Label(L("清理语音与视频缓存"), systemImage: "waveform.slash")
+                    }
+                    Button {
+                        let freed = StorageManager.resetDocMedia(docId, title: doc?.title, includeScripts: false, includeBilingual: true)
+                        resetToast = "✅ " + LF("已释放 %@ 空间", StorageManager.format(freed))
+                        refreshMediaUsage()
+                    } label: {
+                        Label(L("清理语音、视频与双语缓存"), systemImage: "doc.badge.gearshape")
+                    }
+                    Button(role: .destructive) {
+                        let freed = StorageManager.resetDocMedia(docId, title: doc?.title, includeScripts: true, includeBilingual: false)
+                        resetToast = "✅ " + LF("已释放 %@ 空间", StorageManager.format(freed))
+                        refreshMediaUsage()
+                    } label: {
+                        Label(L("完全重置（含 AI 讲解稿）"), systemImage: "trash.slash")
+                    }
+                }
+            }
+            .navigationTitle(L("多端阅读进度与恢复"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(L("完成")) { dismiss() }
+                }
+            }
+            .onAppear {
+                refreshMediaUsage()
+            }
+        }
+    }
+
+    private func refreshMediaUsage() {
+        mediaUsage = StorageManager.docMediaUsage(docId, title: doc?.title)
     }
 }
 
@@ -3012,7 +3457,7 @@ struct iOSSettingsView: View {
                 } header: {
                     Text(L("iCloud 多端同步（iPhone · iPad · Mac）"))
                 } footer: {
-                    Text(L("在 Mac 或 iPhone 上导入的 PDF、双语缓存、TODO/DOING/DONE 标签、阅读进度百分比、脑图卡片及 AI 网关配置会自动通过 iCloud Drive 双向合并同步。"))
+                    Text(L("在 Mac 或 iPhone 上导入的 PDF、讲解稿、摘录批注、笔记本、阅读进度及网关配置会自动通过 iCloud 双向合并同步；语音与视频文件仅保存在本机。"))
                 }
 
                 Section(L("AI 网关与模型配置")) {
@@ -3094,6 +3539,7 @@ struct iOSSettingsView: View {
                 }
 
                 iOSVoiceSettingsSection(targetLang: targetLang)
+                iOSStorageManagementSection(store: store)
             }
             .scrollContentBackground(.hidden)
             .background(MN.shelf)
@@ -3577,6 +4023,125 @@ struct iOSVoiceSettingsSheet: View {
                 }
             }
         }
+    }
+}
+
+struct iOSStorageManagementSection: View {
+    @ObservedObject var store: Store
+    @State private var usage: StorageManager.Usage?
+    @State private var docUsages: [(Doc, StorageManager.DocMediaUsage)] = []
+    @State private var statusMsg: String = ""
+
+    var body: some View {
+        Section {
+            if let u = usage {
+                LabeledContent(L("讲解语音缓存"), value: StorageManager.format(u.audio))
+                LabeledContent(L("导出讲解视频"), value: StorageManager.format(u.video))
+                LabeledContent(L("双语页面缓存"), value: StorageManager.format(u.bilingual))
+                LabeledContent(L("PDF 原文件"), value: StorageManager.format(u.pdfs))
+                LabeledContent(L("笔记、讲稿与翻译"), value: StorageManager.format(u.other))
+                LabeledContent(L("合计"), value: StorageManager.format(u.total))
+                    .fontWeight(.semibold)
+            } else {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(L("正在统计…")).foregroundStyle(.secondary)
+                }
+            }
+
+            if !docUsages.isEmpty {
+                DisclosureGroup(L("单篇文档音视频空间")) {
+                    ForEach(docUsages, id: \.0.id) { doc, du in
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(doc.title)
+                                    .font(.footnote.weight(.medium))
+                                    .lineLimit(1)
+                                Text(LF("语音 %@ (%d 段) · 视频 %@ (%d 个) · 讲稿 %@", StorageManager.format(du.audioBytes), du.audioCount, StorageManager.format(du.videoBytes), du.videoCount, StorageManager.format(du.scriptBytes)))
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Menu {
+                                Button {
+                                    let freed = StorageManager.resetDocMedia(doc.id, title: doc.title, includeScripts: false, includeBilingual: false)
+                                    statusMsg = "✅ " + LF("已释放 %@ 空间", StorageManager.format(freed))
+                                    Task { await refresh() }
+                                } label: {
+                                    Label(L("清理语音与视频缓存"), systemImage: "waveform.slash")
+                                }
+                                Button {
+                                    let freed = StorageManager.resetDocMedia(doc.id, title: doc.title, includeScripts: false, includeBilingual: true)
+                                    statusMsg = "✅ " + LF("已释放 %@ 空间", StorageManager.format(freed))
+                                    Task { await refresh() }
+                                } label: {
+                                    Label(L("清理语音、视频与双语缓存"), systemImage: "doc.badge.gearshape")
+                                }
+                                Button(role: .destructive) {
+                                    let freed = StorageManager.resetDocMedia(doc.id, title: doc.title, includeScripts: true, includeBilingual: false)
+                                    statusMsg = "✅ " + LF("已释放 %@ 空间", StorageManager.format(freed))
+                                    Task { await refresh() }
+                                } label: {
+                                    Label(L("完全重置（含 AI 讲解稿）"), systemImage: "trash.slash")
+                                }
+                            } label: {
+                                Text(L("重置"))
+                                    .font(.caption.weight(.semibold))
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .background(Capsule().fill(MN.accent.opacity(0.14)))
+                                    .foregroundStyle(MN.accent)
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+            }
+
+            Button {
+                Task {
+                    await Task.detached(priority: .userInitiated) {
+                        StorageManager.clearAudio()
+                    }.value
+                    for d in store.lib.docs {
+                        _ = StorageManager.resetDocMedia(d.id, title: d.title, includeScripts: false, includeBilingual: false)
+                    }
+                    await refresh()
+                }
+            } label: {
+                Label(L("清理全部语音与视频缓存"), systemImage: "trash")
+            }
+
+            if !statusMsg.isEmpty {
+                Text(statusMsg)
+                    .font(.caption)
+                    .foregroundStyle(.green)
+            }
+        } header: {
+            Text(L("存储与音频空间管理"))
+        } footer: {
+            Text(L("仅同步 PDF、讲解稿、摘录批注、笔记本与阅读进度；语音与视频文件仅保留在本地，不占用 iCloud 流量与空间。"))
+        }
+        .task {
+            await refresh()
+        }
+    }
+
+    private func refresh() async {
+        let docs = store.lib.docs
+        let (u, perDoc) = await Task.detached(priority: .utility) {
+            let totalUsage = StorageManager.usage()
+            var list: [(Doc, StorageManager.DocMediaUsage)] = []
+            for d in docs {
+                let du = StorageManager.docMediaUsage(d.id, title: d.title)
+                if du.totalResettableBytes > 0 || du.bilingualBytes > 0 {
+                    list.append((d, du))
+                }
+            }
+            return (totalUsage, list)
+        }.value
+        usage = u
+        docUsages = perDoc
     }
 }
 
