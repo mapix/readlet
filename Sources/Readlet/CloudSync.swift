@@ -115,6 +115,9 @@ final class CloudSync: ObservableObject {
                 let cNarr = cloudDocDir.appendingPathComponent("narration", isDirectory: true)
                 Self.syncDirectoryFilesBidirectional(localDir: lNarr, cloudDir: cNarr, extensions: ["json"])
             }
+            if !Paths.hasLocalPDF(docId) {
+                _ = await LanSync.shared.downloadDocFromPeers(docId)
+            }
             if Paths.hasLocalPDF(docId), PDFDocument(url: localPDF) != nil {
                 Store.shared.sessions[docId] = nil
                 return Store.shared.session(docId) != nil
@@ -250,9 +253,15 @@ final class CloudSync: ObservableObject {
         guard !started else { return }
         started = true
 
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
+            LanSync.shared.start()
+        }
+
         let dirs = Self.resolveCloudDirectories()
         if let first = dirs.first {
             cloudLocationDescription = first.path.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+        } else if Bundle.main.bundleIdentifier != nil {
+            cloudLocationDescription = "iCloud + LAN (\(DeviceIdentity.currentDeviceName))"
         } else {
             state = .unavailable("iCloud Drive 未启用")
         }
@@ -840,6 +849,11 @@ final class CloudSync: ObservableObject {
                             }
                         }
                     }
+                }
+
+                // 3b. Sync library metadata, missing PDFs, thumbnails, narration JSON scripts, and images with any discovered LAN peers
+                if await LanSync.shared.syncWithPeers(localBase: localBase, workingLib: &workingLib, deletedSet: deletedSet) {
+                    anyLocalChange = true
                 }
 
                 // 4. Write merged `library.json` back to all cloud directories and local only if changed

@@ -67,10 +67,13 @@ final class NarrationExporter: ObservableObject {
     }
 
     /// limitPages: only export the first N pages (testing; env EXPORT_PAGES)
-    func start(limitPages: Int? = nil, prepareOnly: Bool = false) {
+    func start(limitPages: Int? = nil, prepareOnly: Bool = false, forDocId: UUID? = nil, fromPage: Int? = nil) {
         guard task == nil else { return }
         self.prepareOnly = prepareOnly
         let n = Narrator.shared
+        if let targetId = forDocId, let ses = Store.shared.session(targetId) {
+            n.bindForPrepare(docId: targetId, doc: ses.original, title: ses.doc.title, from: fromPage ?? 0)
+        }
         guard let docId = n.docId, let doc = n.narratedDoc, let ses = Store.shared.session(docId) else {
             phase = .failed; detail = L("请先开始 AI 解读"); log("failed: no narration"); return
         }
@@ -91,6 +94,27 @@ final class NarrationExporter: ObservableObject {
             }
             self.task = nil
         }
+    }
+
+    static func estimateText(_ plan: Narrator.PreparePlan) -> String {
+        let n = Narrator.shared
+        let avg = UsageStore.shared.average(feature: "narration") ?? (input: 2600, output: 700)
+        let calls = plan.missingScripts
+        let inTok = calls * avg.input, outTok = calls * avg.output
+        var s = calls == 0 ? L("讲稿已全部生成。") : LF("预计调用模型约 %d 次（约 %@ 输入 / %@ 输出 token）", calls, inTok.compact, outTok.compact)
+        let remote = n.effectiveProvider.isRemote
+        var cost: Double = 0
+        #if os(macOS)
+        cost = ChatGPTAuth.shared.connected && ModelConfig.style("chat") == .chatgpt ? 0 : Pricing.cost(model: ModelConfig.chatModel, input: inTok, output: outTok)
+        #else
+        cost = Pricing.cost(model: ModelConfig.chatModel, input: inTok, output: outTok)
+        #endif
+        if plan.missingChars > 0 {
+            s += remote ? "；" + LF("语音约 %@ 字", plan.missingChars.compact) : "；" + L("语音用系统声音合成，免费")
+            if remote { cost += Pricing.ttsCost(chars: plan.missingChars) }
+        }
+        if Pricing.enabled, cost > 0 { s += "\n" + L("按你设置的单价估算约 ") + Pricing.format(cost) }
+        return s
     }
 
     private func run(docId: UUID, doc: PDFDocument, ses: DocSession, title: String, pageCount: Int) async throws {
@@ -125,7 +149,7 @@ final class NarrationExporter: ObservableObject {
         for p in order { for (i, s) in (scripts[p] ?? []).enumerated() where !n.hasClip(page: p, seg: i, tag: voice) { missingAudio.append((p, i, s.text)) } }
         log("missingAudio \(missingAudio.count)")
         phase = .audio; total = missingAudio.count; done = 0; detail = missingAudio.isEmpty ? "" : LF("缺 %d 段", missingAudio.count)
-        try await window(missingAudio, width: n.effectiveProvider.isRemote ? 4 : 2) { x in _ = try? await n.audio(page: x.0, seg: x.1, text: x.2) }
+        try await window(missingAudio, width: n.effectiveProvider.isRemote ? 5 : 2) { x in _ = try? await n.audio(page: x.0, seg: x.1, text: x.2) }
         try Task.checkCancellation()
 
         if prepareOnly {

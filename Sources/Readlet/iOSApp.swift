@@ -1516,6 +1516,13 @@ struct iOSDocumentStudyView: View {
                                     Label(LF("继续上次讲解 (p.%d · 第 %d 段)", saved.page + 1, saved.seg + 1), systemImage: "play.circle")
                                 }
                             }
+                            Button {
+                                let curPage = rc.syncCurrentPageFromView()
+                                NarrationExporter.shared.start(prepareOnly: true, forDocId: docId, fromPage: curPage)
+                            } label: {
+                                Label(L("准备全部讲解"), systemImage: "tray.and.arrow.down")
+                            }
+                            .disabled(NarrationExporter.shared.running)
                             Menu {
                                 Section(LF("音色 (%@)", L(narrator.effectiveProvider.shortTitle))) {
                                     ForEach(narrator.voiceOptions) { o in
@@ -2120,9 +2127,12 @@ struct iOSNarratorBar: View {
     @ObservedObject var narrator: Narrator
     @ObservedObject var rc: ReaderController
     var onOpenVoiceSettings: (() -> Void)? = nil
+    @ObservedObject private var ex = NarrationExporter.shared
     @ObservedObject private var themeCenter = iOSThemeCenter.shared
     @Environment(\.colorScheme) private var colorScheme
     @State private var styleTick = 0
+    @State private var confirmPrepare = false
+    @State private var prepareEstimate = ""
 
     private var currentSubtitle: String {
         if narrator.listening {
@@ -2167,8 +2177,43 @@ struct iOSNarratorBar: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            // Row 1: Header with AI badge, page/segment counter, "From here" action, and Close button
-            HStack(spacing: 8) {
+            if ex.phase != .idle {
+                HStack(spacing: 8) {
+                    Image(systemName: ex.phase == .failed ? "exclamationmark.triangle.fill" : (ex.phase == .done ? "checkmark.circle.fill" : "tray.and.arrow.down.fill"))
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(ex.phase == .failed ? .red : MN.accent)
+                    Text(ex.statusText)
+                        .font(.caption2.monospacedDigit().weight(.medium))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    if ex.running, ex.total > 0 {
+                        ProgressView(value: Double(ex.done), total: Double(ex.total))
+                            .tint(MN.accent)
+                            .frame(width: 64)
+                    } else if ex.running {
+                        ProgressView().controlSize(.mini)
+                    }
+                    Spacer(minLength: 4)
+                    if ex.running {
+                        Button(L("取消")) { ex.cancel() }
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.red)
+                    } else {
+                        Button { ex.phase = .idle } label: {
+                            Image(systemName: "xmark")
+                                .font(.caption2.weight(.bold))
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(RoundedRectangle(cornerRadius: 8).fill(MN.accent.opacity(0.1)))
+            }
+
+            // Row 1: Header with AI badge, page/segment counter, buffered count, "From here" action, Prepare All, and Close button
+            HStack(spacing: 6) {
                 HStack(spacing: 5) {
                     Image(systemName: "waveform")
                         .font(.caption.weight(.bold))
@@ -2176,14 +2221,44 @@ struct iOSNarratorBar: View {
                         .frame(width: 20, height: 20)
                         .background(Circle().fill(MN.accent))
 
-                    Text("p.\(narrator.page + 1) · \(narrator.segIndex + 1)/\(max(1, narrator.segments.count))")
-                        .font(.caption.monospacedDigit().weight(.semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("p.\(narrator.page + 1) · \(narrator.segIndex + 1)/\(max(1, narrator.segments.count))")
+                            .font(.caption.monospacedDigit().weight(.semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+
+                        TimelineView(.periodic(from: .now, by: 1)) { _ in
+                            let eta = narrator.remainingSeconds().map { " · " + Narrator.formatRemainingShort($0) } ?? ""
+                            Text(LF("已缓冲 %d 段", narrator.buffered) + eta)
+                                .font(.system(size: 10, weight: .medium).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
                 }
 
                 Spacer(minLength: 4)
+
+                Button {
+                    prepareEstimate = NarrationExporter.estimateText(narrator.preparePlan())
+                    confirmPrepare = true
+                } label: {
+                    Image(systemName: "tray.and.arrow.down")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(MN.accent)
+                        .frame(width: 28, height: 28)
+                        .background(Circle().fill(MN.accent.opacity(0.14)))
+                }
+                .buttonStyle(.plain)
+                .disabled(ex.running)
+                .accessibilityLabel(L("准备全部讲解"))
+                .confirmationDialog(LF("为全部 %d 页生成讲解和语音？", narrator.pageCount), isPresented: $confirmPrepare) {
+                    Button(L("开始准备")) { ex.start(prepareOnly: true) }
+                    Button(L("取消"), role: .cancel) {}
+                } message: {
+                    Text(L("会从当前页开始，在后台逐页调用模型写讲稿，再合成全部语音；已生成的部分会跳过。页数多时需要较长时间并产生相应的模型费用，可以随时取消。") + "\n\n" + prepareEstimate)
+                }
 
                 Button {
                     _ = rc.syncCurrentPageFromView()

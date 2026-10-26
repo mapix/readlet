@@ -369,6 +369,23 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
         play(page: targetPage, seg: 0)
     }
 
+    /// Binds a document context for background "Prepare All" pre-rendering without starting audio playback if currently idle.
+    func bindForPrepare(docId: UUID, doc: PDFDocument, title: String, from page: Int = 0) {
+        if self.docId == docId && self.doc != nil { return }
+        if state != .idle { stop() }
+        let v = Settings.ttsVoice, r = Settings.ttsSpeed, pr = Settings.ttsProvider, sv = Settings.systemVoice
+        if voice != v { voice = v }
+        if rate != r { rate = r }
+        if provider != pr { provider = pr }
+        if systemVoice != sv { systemVoice = sv }
+        fallbackToSystem = false
+        if self.docId != docId { pageChars = [:]; pageCharsMissing = [] }
+        self.docId = docId; self.doc = doc; self.title = title
+        sourceDoc = Store.shared.session(docId)?.original
+        pageCount = doc.pageCount
+        self.page = max(0, min(max(0, pageCount - 1), page))
+    }
+
     /// ignore the saved position and start at the page currently shown in the reader (from segment 0)
     func restartFromCurrentPage() {
         guard let id = docId, let d = doc else { return }
@@ -622,10 +639,6 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
 
     private func play(page p: Int, seg: Int) {
         let token = UUID(); runToken = token
-        // Cancel background prefetch so the current segment gets immediate network priority
-        prefetchToken = UUID()
-        prefetchTask?.cancel()
-        prefetchTask = nil
         player?.stop(); player = nil
         error = nil
         page = p
@@ -645,6 +658,8 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
             segments = []
             segIndex = 0
         }
+        // Start preparing scripts for upcoming pages immediately in parallel
+        kickScripts(after: p)
         #if os(iOS)
         updateNowPlayingInfo()
         #endif
@@ -665,7 +680,8 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
                 #if os(iOS)
                 updateNowPlayingInfo()
                 #endif
-                // Synthesize the urgent current segment FIRST before starting look-ahead prefetch
+                // Launch look-ahead prefetch for upcoming segments (i + 1 ...) in parallel with current segment synthesis!
+                prefetch(page: p, from: i + 1)
                 let wav = try await audio(page: p, seg: i, text: segs[i].text, urgent: true)
                 guard token == runToken else { return }
                 let pl = try makePlayer(wav)
@@ -676,12 +692,11 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
                 Narrator.activeReader?.highlightNarration(page: p, quote: segs[i].focus)
                 if recording { recorded.insert("\(p)-\(i)") }
                 pl.play()
+                refreshBuffered()
                 #if os(iOS)
                 updateNowPlayingInfo()
                 endBackgroundTransitionTask()
                 #endif
-                // Start look-ahead buffering only after the current segment is actively playing
-                prefetch(page: p, from: i + 1)
             } catch is CancellationError {
                 return
             } catch {
@@ -802,18 +817,18 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
     }
 
     /// start writing scripts for the pages after `p` (parallel, deduplicated by `script(for:)`)
-    private func kickScripts(after p: Int, token: UUID) {
+    private func kickScripts(after p: Int) {
         guard pageCount > 0 else { return }
         let activeDoc = docId
-        for k in 1...min(2, Narrator.scriptPagesAhead) where p + k < pageCount {
+        for k in 1...Narrator.scriptPagesAhead where p + k < pageCount {
             let pg = p + k
             if chars(ofPage: pg) != nil { continue }       // already written (in flight ones are joined below)
             Task {
                 guard self.docId == activeDoc, self.state != .idle else { return }
                 guard let segs = try? await self.script(for: pg), !segs.isEmpty else { return }
                 // a new script widens what the audio pipeline can buffer
-                if token == self.prefetchToken, self.docId == activeDoc, self.page == p, self.state == .playing {
-                    self.prefetch(page: p, from: self.segIndex + 1)
+                if self.docId == activeDoc, self.state != .idle {
+                    self.prefetch(page: self.page, from: self.segIndex + 1)
                 }
             }
         }
@@ -823,7 +838,7 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
         prefetchTask?.cancel()
         let token = UUID(); prefetchToken = token
         let activeDoc = docId
-        kickScripts(after: p, token: token)
+        kickScripts(after: p)
         let first = segments, tag = voiceTag
         let pace = Narrator.pace, speed = Double(max(0.25, rate)), target = Narrator.bufferSeconds
         // plan: upcoming segments over pages that are already scripted, skipping cached audio
@@ -841,8 +856,9 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
             guard pg < pageCount, let next = cachedScript(pg, docId: activeDoc) else { break }   // not written yet → kickScripts re-triggers
             segs = next
         }
-        guard !plan.isEmpty else { refreshBuffered(); return }
-        let width = effectiveProvider.isRemote ? 2 : 1
+        refreshBuffered()
+        guard !plan.isEmpty else { return }
+        let width = effectiveProvider.isRemote ? 5 : 1
         prefetchTask = Task {
             // sliding window: start the next request as soon as one finishes, in playback order
             await withTaskGroup(of: Void.self) { g in
@@ -954,24 +970,28 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
         let remote = effectiveProvider.isRemote
         let cfg = TTSConfig.current(effectiveProvider)
         let task = Task<Data, Error> { @MainActor in
-            if !remote { return try await self.systemSynth(text, urgent: urgent) }
-            return try await RemoteTTS.synthesize(text, cfg, attempts: 3)
+            defer { self.audioTasks[key] = nil }
+            let d: Data
+            if !remote {
+                d = try await self.systemSynth(text, urgent: urgent)
+            } else {
+                d = try await RemoteTTS.synthesize(text, cfg, attempts: 3)
+            }
+            self.storeClip(d, page: p, seg: i, tag: tag, docId: targetDocId)
+            self.learnPace(key: stem, text: text, wav: d)
+            if self.docId == targetDocId {
+                self.refreshBuffered()
+            }
+            return d
         }
         audioTasks[key] = task
-        defer { audioTasks[key] = nil }
-        let d: Data
-        do { d = try await task.value }
-        catch where remote && RemoteTTS.isConfigError(error) {
-            // the speech service is not usable (no key / model / permission): switch this run to the macOS voice
+        do {
+            return try await task.value
+        } catch where remote && RemoteTTS.isConfigError(error) {
+            // the speech service is not usable (no key / model / permission): switch this run to the system voice
             if !fallbackToSystem { fallbackToSystem = true; fallbackReason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription }
             return try await audio(page: p, seg: i, text: text, urgent: urgent)
         }
-        storeClip(d, page: p, seg: i, tag: tag, docId: targetDocId)
-        learnPace(key: stem, text: text, wav: d)
-        if self.docId == targetDocId {
-            refreshBuffered()
-        }
-        return d
     }
 
     /// The gateway wraps the TTS WAV inside another WAV and appends C2PA/SynthID metadata after the PCM.

@@ -80,6 +80,8 @@ cat > "$APP/Contents/Info.plist" <<P
 <key>NSHighResolutionCapable</key><true/>
 <key>NSMicrophoneUsageDescription</key><string>Hold the mic during AI narration to ask a question by voice. / AI 解读时按住麦克风语音提问。</string>
 <key>NSSpeechRecognitionUsageDescription</key><string>Turns your spoken question into text. / 把你的语音提问转成文字。</string>
+<key>NSLocalNetworkUsageDescription</key><string>Syncs PDFs, narration scripts, and reading progress directly between your Mac and iPhone/iPad over local network. / 在局域网内直接同步 Mac 与手机的 PDF、讲解稿与阅读进度。</string>
+<key>NSBonjourServices</key><array><string>_readlet-sync._tcp</string></array>
 <key>NSAppTransportSecurity</key><dict>
   <!-- model gateways and speech servers are configured by the user; local ones (Ollama, LM Studio) use http:// -->
   <key>NSAllowsArbitraryLoads</key><true/>
