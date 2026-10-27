@@ -496,7 +496,8 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
         }
         systemBusy = false
         qaPlayer?.stop(); qaPlayer = nil
-        if listening { listening = false; VoiceInput.shared.stop { _ in } }
+        listening = false
+        VoiceInput.shared.forceStop()
         player?.stop(); player = nil
         state = .idle
         segments = []; segIndex = 0
@@ -542,7 +543,10 @@ final class Narrator: NSObject, ObservableObject, AVAudioPlayerDelegate {
     }
 
     func endQuestion() {
-        guard listening else { return }
+        guard listening else {
+            VoiceInput.shared.forceStop()
+            return
+        }
         listening = false
         VoiceInput.shared.stop { [weak self] final in
             guard let self else { return }

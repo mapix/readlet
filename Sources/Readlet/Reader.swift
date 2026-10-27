@@ -166,12 +166,21 @@ final class ReaderController: NSObject, ObservableObject {
             if let self, e.window === self.view.window { self.userScrolledAt = Date(); self.lastScroll = Date(); self.holdTarget = nil }
             return e
         }
-        NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] e in
+        NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp, .flagsChanged]) { [weak self] e in
             let n = Narrator.shared
             guard let self, e.window === self.view.window else { return e }
-            guard n.state != .idle, e.keyCode == 49, e.modifierFlags.contains(.control) || n.listening else { return e }
-            if e.type == .keyDown, !e.isARepeat { n.beginQuestion() }
-            if e.type == .keyUp { n.endQuestion() }
+            if n.listening {
+                if e.type == .keyUp && e.keyCode == 49 {
+                    n.endQuestion()
+                    return nil
+                }
+                if e.type == .flagsChanged && !e.modifierFlags.contains(.control) {
+                    n.endQuestion()
+                    return e
+                }
+            }
+            guard n.state == .playing, e.type == .keyDown, e.keyCode == 49, e.modifierFlags.contains(.control) else { return e }
+            if !e.isARepeat { n.beginQuestion() }
             return nil
         }
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
